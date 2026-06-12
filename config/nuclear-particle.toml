@@ -1,0 +1,127 @@
+[categories]
+"nucl-th" = 1.00
+"hep-ph" = 0.90
+"astro-ph.HE" = 0.88
+"astro-ph.SR" = 0.72
+"gr-qc" = 0.68
+"hep-th" = 0.60
+"hep-ex" = 0.42
+"nucl-ex" = 0.40
+"math-ph" = 0.30
+"math.GR" = 0.22
+
+[ranking]
+report_limit = 20
+relevance_threshold = 0.60
+backfill_days = 7
+announcement_max_age_days = 1
+history_report_limit = 100
+history_library_limit = 100
+recency_decay_days = 180.0
+mmr_lambda = 0.75
+
+[model]
+base_model = "allenai/specter2_base"
+base_revision = "3447645e1def9117997203454fa4495937bfbd83"
+adapter_model = "allenai/specter2"
+adapter_revision = "2081559630a80fc5851d8f798a05ba81e9468089"
+batch_size = 12
+
+[[topics]]
+name = "nuclear astrophysics"
+weight = 1.00
+phrases = [
+  "nuclear astrophysics",
+  "dense matter",
+  "equation of state",
+  "r-process",
+  "core-collapse supernova",
+  "compact object",
+  "multi-messenger",
+]
+
+[[topics]]
+name = "neutron stars"
+weight = 0.96
+phrases = [
+  "neutron star",
+  "neutron-star",
+  "magnetar",
+  "tidal deformability",
+  "post-merger",
+  "merger remnant",
+  "hyperon",
+  "quark matter",
+]
+
+[[topics]]
+name = "nucl-th"
+weight = 0.88
+phrases = [
+  "nuclear matter",
+  "many-body",
+  "mean field",
+  "chiral effective",
+  "finite temperature",
+  "phase transition",
+]
+
+[[topics]]
+name = "hep-ph"
+weight = 0.78
+phrases = [
+  "particle phenomenology",
+  "qcd",
+  "axion",
+  "neutrino",
+  "beyond the standard model",
+  "dark matter",
+]
+
+[[topics]]
+name = "field theory and RG methods"
+weight = 0.68
+phrases = [
+  "renormalization group",
+  "functional renormalization",
+  "effective field theory",
+  "quantum field theory",
+  "critical phenomena",
+  "fixed point",
+]
+
+[[topics]]
+name = "high-energy astronomical phenomena"
+weight = 0.58
+phrases = [
+  "high-energy astrophysics",
+  "gravitational wave",
+  "gamma-ray",
+  "supernova",
+  "kilonova",
+  "fast radio burst",
+  "black hole",
+]
+
+[[topics]]
+name = "hep-ex"
+weight = 0.38
+phrases = [
+  "collider",
+  "detector",
+  "experimental constraint",
+  "search for",
+  "measurement of",
+]
+
+[[topics]]
+name = "group theory"
+weight = 0.22
+phrases = [
+  "group theory",
+  "representation theory",
+  "lie algebra",
+  "finite group",
+  "irreducible representation",
+  "symmetry group",
+]

@@ -1,0 +1,8 @@
+.DS_Store
+.venv/
+.state/
+__pycache__/
+*.py[cod]
+*.tmp
+profile.toml
+uv.lock

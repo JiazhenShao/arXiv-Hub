@@ -1,0 +1,10 @@
+[project]
+name = "arxiv-hub"
+version = "0.1.0"
+description = "Private local arXiv recommendations and reading workflow for macOS"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = []
+
+[tool.unittest]
+start-directory = "tests"

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>ArXiv Query</title>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2606.00001v2</id>
+    <updated>2026-06-08T12:30:00Z</updated>
+    <published>2026-06-08T12:00:00Z</published>
+    <title>Dense Matter in Neutron-Star Mergers</title>
+    <summary>We study dense matter in neutron-star mergers
+using a controlled equation of state.</summary>
+    <author><name>Ada Researcher</name></author>
+    <author><name>Emmy Physicist</name></author>
+    <category term="nucl-th"/>
+    <category term="astro-ph.HE"/>
+    <arxiv:primary_category term="nucl-th"/>
+    <link href="https://arxiv.org/abs/2606.00001v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="https://arxiv.org/pdf/2606.00001v2" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>https://arxiv.org/abs/2606.00002v1</id>
+    <updated>2026-06-08T13:30:00Z</updated>
+    <published>2026-06-08T13:00:00Z</published>
+    <title>Renormalization-Group Flows at Finite Density</title>
+    <summary>We derive renormalization-group flows for a finite-density
+field theory and discuss compact-star applications.</summary>
+    <author><name>Noether Scientist</name></author>
+    <category term="hep-ph"/>
+    <category term="hep-th"/>
+    <arxiv:primary_category term="hep-ph"/>
+    <link href="https://arxiv.org/abs/2606.00002v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="https://arxiv.org/pdf/2606.00002v1" rel="related" type="application/pdf"/>
+  </entry>
+</feed>
