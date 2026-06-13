@@ -13,6 +13,7 @@ from .history import parse_report_history, report_arxiv_ids, scan_library
 from .models import InterestPaper, Paper
 from .ranking import build_interest_clusters, rank_candidates, select_diverse
 from .report import ExistingReportError, render_report, write_report_atomic
+from .seed_library import SeedScanError, scan_seed_library
 from .state import MetadataCache, RecommenderState
 from .viewer import write_html_companion
 
@@ -67,6 +68,8 @@ class DailyPipeline:
                 record_dir=record_dir,
                 active_library_dir=record_dir / "missing-active",
                 archive_library_dir=record_dir / "missing-old",
+                seed_library_dir=None,
+                seed_library_limit=100,
                 categories={"nucl-th": 1.0, "astro-ph.HE": 0.8},
                 topics=(
                     Topic("nuclear astrophysics", 1.0, ("neutron", "dense matter")),
@@ -106,6 +109,24 @@ class DailyPipeline:
             ],
             self.config.history_library_limit,
         )
+        if (
+            self.config.seed_library_dir is not None
+            and self.config.seed_library_dir.is_dir()
+            and not self.config.seed_library_dir.is_symlink()
+        ):
+            try:
+                seed_scan = scan_seed_library(
+                    self.config.seed_library_dir,
+                    cache_path=(
+                        self.config.record_dir
+                        / ".state"
+                        / "seed-library-index.json"
+                    ),
+                    limit=self.config.seed_library_limit,
+                )
+                library_items.extend(seed_scan.candidates)
+            except SeedScanError:
+                pass
         missing_ids = [
             item.arxiv_id
             for item in library_items

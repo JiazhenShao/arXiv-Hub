@@ -10,7 +10,7 @@ from unittest.mock import patch
 from arxiv_daily.models import Paper, RankedPaper
 from arxiv_daily.pipeline import DailyPipeline, PipelineError
 from arxiv_daily.report import ExistingReportError, render_report, write_report_atomic
-from arxiv_daily.state import RecommenderState
+from arxiv_daily.state import MetadataCache, RecommenderState
 
 
 def sample_paper(arxiv_id: str = "2606.00001") -> Paper:
@@ -200,9 +200,15 @@ class ReportTests(unittest.TestCase):
 
 
 class FakeSource:
-    def __init__(self, papers: list[Paper] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        papers: list[Paper] | None = None,
+        error: Exception | None = None,
+        by_id: dict[str, Paper] | None = None,
+    ):
         self.papers = papers or []
         self.error = error
+        self.by_id = by_id or {}
         self.fetch_count = 0
 
     def fetch_candidates(self, start: date, end: date) -> list[Paper]:
@@ -214,7 +220,11 @@ class FakeSource:
     def fetch_by_ids(self, arxiv_ids: list[str]) -> list[Paper]:
         if self.error:
             raise self.error
-        return []
+        return [
+            self.by_id[arxiv_id]
+            for arxiv_id in arxiv_ids
+            if arxiv_id in self.by_id
+        ]
 
 
 class FakeEmbedder:
@@ -230,6 +240,35 @@ class FakeEmbedder:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_verified_seed_folder_papers_join_interest_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            seed.mkdir()
+            (seed / "[!!!] 2501.00001v1.pdf").write_bytes(b"%PDF-test")
+            seed_paper = sample_paper("2501.00001")
+            source = FakeSource(by_id={seed_paper.arxiv_id: seed_paper})
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+            )
+            pipeline.config = replace(
+                pipeline.config,
+                seed_library_dir=seed,
+                seed_library_limit=100,
+            )
+
+            interests = pipeline._load_interests(
+                date(2026, 6, 12),
+                MetadataCache(root / ".state" / "metadata.json"),
+            )
+
+            self.assertEqual(
+                [(item.paper.arxiv_id, item.weight) for item in interests],
+                [("2501.00001", 4.0)],
+            )
+
     def test_weekend_creates_no_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pipeline = DailyPipeline.minimal(

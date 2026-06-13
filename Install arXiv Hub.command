@@ -9,7 +9,6 @@ UV_PYTHON_INSTALL_DIR="$APP_SUPPORT/python"
 PROFILE_PATH="$APP_SUPPORT/profile.toml"
 LAUNCHER_DIR="$HOME/Applications"
 LAUNCHER_PATH="$LAUNCHER_DIR/arXiv Hub.command"
-CONFIGURE_PATH="$LAUNCHER_DIR/Configure arXiv Hub.command"
 SOURCE_DIR="${0:A:h}"
 UV_VERSION="0.11.21"
 
@@ -72,15 +71,13 @@ print "Creating the private environment..."
 "$UV" venv --python 3.12 "$NEW_VENV"
 "$UV" pip sync --python "$NEW_VENV/bin/python" "$NEW_APP/requirements.lock"
 
-if [[ ! -f "$PROFILE_PATH" ]]; then
-  print "Opening the setup wizard in your default browser..."
-  "$NEW_VENV/bin/python" "$NEW_APP/scripts/setup_profile.py" \
+if [[ -f "$PROFILE_PATH" ]]; then
+  print "Verifying the pinned SPECTER2 model..."
+  "$NEW_VENV/bin/python" "$NEW_APP/scripts/verify_model.py" \
     --profile "$PROFILE_PATH"
+else
+  print "First-run setup will open when arXiv Hub is launched."
 fi
-
-print "Downloading and verifying the pinned SPECTER2 model..."
-"$NEW_VENV/bin/python" "$NEW_APP/scripts/verify_model.py" \
-  --profile "$PROFILE_PATH"
 
 SWITCH_STARTED=1
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
@@ -94,10 +91,9 @@ mv "$NEW_APP" "$APP_DIR"
 mv "$NEW_VENV" "$VENV_DIR"
 SWITCH_COMPLETE=1
 
-ditto "$SOURCE_DIR/launcher/arXiv Hub.command" "$LAUNCHER_PATH"
-ditto "$SOURCE_DIR/launcher/Configure arXiv Hub.command" "$CONFIGURE_PATH"
+ditto "$SOURCE_DIR/launcher/arXiv Hub.launcher.zsh" "$LAUNCHER_PATH"
 chmod 755 "$LAUNCHER_PATH"
-chmod 755 "$CONFIGURE_PATH"
+rm -f "$LAUNCHER_DIR/Configure arXiv Hub.command"
 
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
 print ""

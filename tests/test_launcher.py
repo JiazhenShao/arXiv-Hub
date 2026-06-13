@@ -44,6 +44,10 @@ class LauncherTests(unittest.TestCase):
 
             self.assertIsNone(select_report_date(root, None))
 
+    def test_default_launch_allows_an_empty_report_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(select_report_date(Path(tmp), None))
+
     def test_rejects_requested_date_without_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):

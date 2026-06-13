@@ -23,10 +23,10 @@ Codex, Homebrew, and a system Python installation are not required.
 
 1. Download this repository as a ZIP and extract it.
 2. Right-click `Install arXiv Hub.command`, choose **Open**, then confirm once.
-3. Complete the setup page that opens in your default browser.
-4. Let the installer download and verify its private Python 3.12 environment
-   and the pinned SPECTER2 model.
-5. Open Spotlight and type `arXiv Hub`.
+3. Let the installer create its private Python 3.12 environment.
+4. Open Spotlight and type `arXiv Hub`.
+5. On first launch, complete the guided interest setup page. Saving opens the
+   normal dashboard automatically in the same browser tab.
 
 macOS may require the right-click **Open** step because this first release is
 not code-signed or notarized. The installer is readable source code and only
@@ -37,10 +37,14 @@ writes to the locations documented below.
 Open `arXiv Hub` from Spotlight. The local dashboard lets you:
 
 - Start a search after your configured local time.
+- Reopen the guided interest editor from **Configure interests**.
 - Browse dated reports with newest dates first.
 - Rate papers High, Medium, Low, Skip, or Unrated.
 - Download High papers from the specific dated report you are viewing.
 - Close the local server from the browser.
+
+The launcher opens one browser tab per session. First-run setup and later
+**Configure interests** transitions reuse that tab instead of opening another.
 
 Searches use the local SPECTER2 model and do not consume LLM API tokens.
 Ratings update the Markdown record and influence later recommendations.
@@ -57,7 +61,6 @@ Spotlight launchers:
 
 ```text
 ~/Applications/arXiv Hub.command
-~/Applications/Configure arXiv Hub.command
 ```
 
 Default user data:
@@ -68,8 +71,8 @@ Default user data:
 ~/Documents/arXiv Hub/Papers Archive
 ```
 
-Use `Configure arXiv Hub` from Spotlight to reopen the setup wizard. Existing
-reports and papers are not moved automatically when paths change.
+Use **Configure interests** on the dashboard to reopen the setup wizard.
+Existing reports and papers are not moved automatically when paths change.
 
 ## Update And Uninstall
 

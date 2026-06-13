@@ -263,6 +263,9 @@ class ViewerServerTests(unittest.TestCase):
             assets_dir=assets,
             token="test-token",
             port=0,
+            supervisor_handoff_url=(
+                "http://127.0.0.1:9001/?token=bridge&after=1"
+            ),
             now_provider=lambda: datetime(
                 2026, 6, 9, 20, 0, tzinfo=ZoneInfo("America/Chicago")
             ),
@@ -393,7 +396,11 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertIn(
-            "grid-template-columns:repeat(2,minmax(0,1fr))",
+            '<button id="configure-interests" class="primary-action">',
+            html,
+        )
+        self.assertIn(
+            "grid-template-columns:repeat(3,minmax(0,1fr))",
             html,
         )
         self.assertIn(
@@ -401,7 +408,7 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertIn(
-            "closeButton.disabled = searchBusy;",
+            "configureButton.disabled = searchBusy;",
             html,
         )
         self.assertIn(
@@ -409,6 +416,74 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertLess(html.index("2026-06-09"), html.index("2026-06-08"))
+
+    def test_configure_reuses_current_tab_through_supervisor_bridge(self) -> None:
+        with urllib.request.urlopen(
+            f"{self.base}/?token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertIn("const supervisorHandoffUrl =", html)
+        self.assertIn(
+            '"http://127.0.0.1:9001/?token=bridge&after=1";',
+            html,
+        )
+        self.assertIn(
+            "window.location.replace(supervisorHandoffUrl)",
+            html,
+        )
+        self.assertNotIn("window.open(supervisorHandoffUrl", html)
+
+    def test_empty_index_shows_no_reports_state(self) -> None:
+        (self.root / "2026-06-08.md").unlink()
+
+        with urllib.request.urlopen(
+            f"{self.base}/?token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertIn("No reports yet", html)
+        self.assertIn('id="configure-interests"', html)
+        self.assertNotIn("Open report", html)
+
+    def test_configure_endpoint_stops_server_with_configure_action(self) -> None:
+        with self._post("/api/configure", {}) as response:
+            self.assertEqual(response.status, 200)
+
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.server.action, "configure")
+
+    def test_configure_endpoint_is_blocked_while_download_runs(self) -> None:
+        with self._post(
+            "/api/download/start",
+            {"date": "2026-06-08"},
+        ) as response:
+            self.assertEqual(response.status, 202)
+        self.assertTrue(self.download_started.wait(timeout=1))
+
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/configure", {})
+
+        self.assertEqual(caught.exception.code, 409)
+        self.download_release.set()
+
+    def test_configure_endpoint_requires_token_and_same_origin(self) -> None:
+        for token, origin in [
+            ("wrong", self.base),
+            ("test-token", "https://malicious.example"),
+        ]:
+            with self.subTest(token=token, origin=origin):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self._post(
+                        "/api/configure",
+                        {},
+                        token=token,
+                        origin=origin,
+                    )
+                self.assertIn(caught.exception.code, {403, 404})
 
     def test_download_status_reports_date_pending_count_and_card_state(self) -> None:
         status = self._get_json("/api/download/status?date=2026-06-08")

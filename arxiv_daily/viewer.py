@@ -609,6 +609,7 @@ def create_server(
     downloader: PaperDownloader | None = None,
     timezone_name: str = DEFAULT_TIMEZONE,
     search_start_time: time = DEFAULT_SEARCH_START_TIME,
+    supervisor_handoff_url: str | None = None,
 ) -> ThreadingHTTPServer:
     record_dir = record_dir.resolve()
     assets_dir = assets_dir.resolve()
@@ -1057,6 +1058,15 @@ def create_server(
                     f"<span>{date}</span><strong>Open report →</strong></a></li>"
                     for date in dates
                 )
+                reports = (
+                    f"<ol>{links}</ol>"
+                    if links
+                    else (
+                        '<div class="empty-state"><strong>No reports yet</strong>'
+                        "<span>Use Start searching when it becomes available.</span>"
+                        "</div>"
+                    )
+                )
                 body = (
                     "<!doctype html><html><head><meta charset=\"utf-8\">"
                     "<meta name=\"viewport\" content=\"width=device-width\">"
@@ -1079,7 +1089,11 @@ def create_server(
                     "box-shadow:0 15px 40px rgba(57,66,60,.06)}"
                     ".report-link span{font-size:1.45rem}.report-link strong{"
                     "font:700 .75rem ui-monospace;color:var(--accent)}"
-                    ".actions{display:grid;grid-template-columns:repeat(2,"
+                    ".empty-state{display:grid;gap:7px;padding:24px;border:"
+                    "1px dashed var(--line);border-radius:14px;color:#627069;"
+                    "background:rgba(255,255,255,.46)}.empty-state strong{"
+                    "color:var(--ink);font-size:1.35rem}"
+                    ".actions{display:grid;grid-template-columns:repeat(3,"
                     "minmax(0,1fr));gap:18px;align-items:start;margin:0 0 30px}"
                     ".action-column{display:grid;grid-template-rows:auto "
                     "minmax(1.25rem,auto);gap:8px;min-width:0}"
@@ -1087,6 +1101,8 @@ def create_server(
                     "18px;border-radius:999px;cursor:pointer;font:700 1rem/1.2 "
                     "Georgia,serif}#close-server{border:1px solid #8e3224;"
                     "background:#fff6f2;color:#8e3224}"
+                    "#configure-interests{border:1px solid #9b7425;"
+                    "background:#fffaf0;color:#755619}"
                     "#start-search{border:1px solid #246b50;"
                     "background:#f1fbf5;color:#246b50}"
                     "#start-search:disabled{"
@@ -1105,19 +1121,28 @@ def create_server(
                     "Start searching</button>"
                     '<span id="search-status" aria-live="polite">'
                     "Checking availability...</span></div>"
+                    '<div class="action-column configure-control">'
+                    '<button id="configure-interests" class="primary-action">'
+                    "Configure interests</button>"
+                    '<span aria-hidden="true"></span></div>'
                     '<div class="action-column close-control">'
                     '<button id="close-server" class="primary-action">'
                     "Close Server</button>"
                     '<span id="status" aria-live="polite"></span></div></div>'
-                    f"<ol>{links}</ol>"
+                    f"{reports}"
                     f"""<script>
                     const token = {json.dumps(token)};
+                    const supervisorHandoffUrl =
+                      {json.dumps(supervisor_handoff_url)};
                     const searchButton = document.getElementById("start-search");
                     const searchStatus = document.getElementById("search-status");
+                    const configureButton =
+                      document.getElementById("configure-interests");
                     const closeButton = document.getElementById("close-server");
                     let searchStartedHere = false;
                     let searchBusy = false;
                     function refreshCloseState() {{
+                      configureButton.disabled = searchBusy;
                       closeButton.disabled = searchBusy;
                     }}
                     async function searchPost() {{
@@ -1169,6 +1194,31 @@ def create_server(
                     }});
                     refreshSearchStatus();
                     window.setInterval(refreshSearchStatus, 30000);
+                    configureButton.addEventListener(
+                      "click", async () => {{
+                        configureButton.disabled = true;
+                        try {{
+                          const response = await fetch(
+                            `/api/configure?token=${{encodeURIComponent(token)}}`,
+                            {{
+                              method: "POST",
+                              headers: {{"Content-Type": "application/json"}},
+                              body: "{{}}"
+                            }}
+                          );
+                          if (!response.ok) throw new Error(await response.text());
+                          searchButton.disabled = true;
+                          closeButton.disabled = true;
+                          if (supervisorHandoffUrl) {{
+                            window.location.replace(supervisorHandoffUrl);
+                          }}
+                        }} catch (error) {{
+                          document.getElementById("status").textContent =
+                            "Wait for the active job to finish before configuring.";
+                          await refreshSearchStatus();
+                        }}
+                      }}
+                    );
                     closeButton.addEventListener(
                       "click", async () => {{
                         closeButton.disabled = true;
@@ -1308,6 +1358,23 @@ def create_server(
                 )
                 Thread(target=self.server.shutdown, daemon=True).start()
                 return
+            if parsed.path == "/api/configure":
+                with state_lock:
+                    if active_job["kind"]:
+                        self._error(
+                            HTTPStatus.CONFLICT,
+                            f"Cannot configure while {active_job['kind']} is running",
+                        )
+                        return
+                self.server.action = "configure"
+                response = json.dumps({"ok": True}).encode("utf-8")
+                self._send(
+                    HTTPStatus.OK,
+                    response,
+                    "application/json; charset=utf-8",
+                )
+                Thread(target=self.server.shutdown, daemon=True).start()
+                return
             self._error(HTTPStatus.NOT_FOUND, "Not found")
 
     server = ThreadingHTTPServer(("127.0.0.1", port), ViewerHandler)
@@ -1318,4 +1385,5 @@ def create_server(
         )
     )
     server.downloader = downloader
+    server.action = "shutdown"
     return server

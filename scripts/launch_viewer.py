@@ -26,15 +26,15 @@ from arxiv_daily.viewer import (  # noqa: E402
     generate_all_html,
     list_report_dates,
 )
+from scripts.browser_bridge import atomic_write_destination  # noqa: E402
 
 
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+CONFIGURE_EXIT_CODE = 75
 
 
 def select_report_date(record_dir: Path, requested: str | None) -> str | None:
     dates = list_report_dates(record_dir)
-    if not dates:
-        raise ValueError("No dated Markdown reports are available")
     if requested is not None:
         if requested not in dates:
             raise ValueError(f"No Markdown report exists for {requested}")
@@ -204,11 +204,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Start the server without opening the default browser.",
     )
+    parser.add_argument("--bridge-state", type=Path)
+    parser.add_argument("--bridge-generation", type=int)
+    parser.add_argument("--supervisor-handoff-url")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if (args.bridge_state is None) != (args.bridge_generation is None):
+        print(
+            "VIEWER FAILED: bridge state and generation must be supplied together",
+            file=sys.stderr,
+        )
+        return 2
     config = ProfileConfig.load(args.profile)
     try:
         report_date = select_report_date(config.record_dir, args.date)
@@ -232,8 +241,20 @@ def main() -> int:
         downloader=make_downloader(config),
         timezone_name=config.viewer_timezone,
         search_start_time=config.search_start_time,
+        supervisor_handoff_url=args.supervisor_handoff_url,
     )
     url = viewer_url(server.server_port, token, report_date)
+    if args.bridge_state is not None:
+        try:
+            atomic_write_destination(
+                args.bridge_state,
+                generation=args.bridge_generation,
+                url=url,
+            )
+        except (OSError, ValueError) as exc:
+            server.server_close()
+            print(f"VIEWER FAILED: could not publish browser destination: {exc}", file=sys.stderr)
+            return 2
     print(f"Daily arXiv Viewer: {url}")
     print(f"Refreshed {len(generated)} offline HTML report(s).")
     available_at = config.search_start_time.strftime("%-I:%M %p")
@@ -253,7 +274,7 @@ def main() -> int:
         print("\nStopping viewer.")
     finally:
         server.server_close()
-    return 0
+    return CONFIGURE_EXIT_CODE if server.action == "configure" else 0
 
 
 if __name__ == "__main__":
