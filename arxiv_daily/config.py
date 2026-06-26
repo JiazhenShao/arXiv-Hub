@@ -19,6 +19,8 @@ class ProfileConfig:
     record_dir: Path
     active_library_dir: Path
     archive_library_dir: Path
+    seed_library_dir: Path | None
+    seed_library_limit: int
     categories: dict[str, float]
     topics: tuple[Topic, ...]
     report_limit: int
@@ -84,6 +86,12 @@ class ProfileConfig:
             record_dir=Path(paths["record_dir"]).expanduser(),
             active_library_dir=Path(paths["active_library_dir"]).expanduser(),
             archive_library_dir=Path(paths["archive_library_dir"]).expanduser(),
+            seed_library_dir=(
+                Path(paths["seed_library_dir"]).expanduser()
+                if paths.get("seed_library_dir")
+                else None
+            ),
+            seed_library_limit=int(ranking.get("seed_library_limit", 100)),
             categories={
                 str(key): float(value)
                 for key, value in data["categories"].items()

@@ -14,6 +14,7 @@ narwhals==2.22.1
 networkx==3.6.1
 numpy==2.4.6
 packaging==26.2
+pypdf==6.13.2
 PyYAML==6.0.3
 regex==2026.5.9
 requests==2.34.2

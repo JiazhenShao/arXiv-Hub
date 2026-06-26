@@ -4,6 +4,8 @@ arXiv Hub is a private, local paper recommender and reading dashboard for
 Apple Silicon Macs. It fetches real metadata from the official arXiv API,
 ranks papers with a pinned SPECTER2 embedding model, writes auditable daily
 Markdown/HTML reports, remembers ratings, and downloads selected High papers.
+The dashboard shows seven report dates at a time with compact older/newer
+navigation.
 
 The included preset emphasizes nuclear astrophysics, neutron stars, nuclear
 theory, particle phenomenology, field theory/RG, high-energy astrophysics,
@@ -23,10 +25,10 @@ Codex, Homebrew, and a system Python installation are not required.
 
 1. Download this repository as a ZIP and extract it.
 2. Right-click `Install arXiv Hub.command`, choose **Open**, then confirm once.
-3. Complete the setup page that opens in your default browser.
-4. Let the installer download and verify its private Python 3.12 environment
-   and the pinned SPECTER2 model.
-5. Open Spotlight and type `arXiv Hub`.
+3. Let the installer create its private Python 3.12 environment.
+4. Open Spotlight and type `arXiv Hub`.
+5. On first launch, complete the guided interest setup page. Saving opens the
+   normal dashboard automatically in the same browser tab.
 
 macOS may require the right-click **Open** step because this first release is
 not code-signed or notarized. The installer is readable source code and only
@@ -34,16 +36,29 @@ writes to the locations documented below.
 
 ## Daily Use
 
-Open `arXiv Hub` from Spotlight. The local dashboard lets you:
+Open `ArXiv Go` from Spotlight. The local dashboard lets you:
 
-- Start a search after your configured local time.
+- Start a new weekday digest after your configured local time.
+- Search an unfinished digest throughout its following reading day.
+- Reopen the guided interest editor from **Configure interests**.
 - Browse dated reports with newest dates first.
 - Rate papers High, Medium, Low, Skip, or Unrated.
 - Download High papers from the specific dated report you are viewing.
 - Close the local server from the browser.
 
+The launcher opens one browser tab per session. First-run setup and later
+**Configure interests** transitions reuse that tab instead of opening another.
+
 Searches use the local SPECTER2 model and do not consume LLM API tokens.
 Ratings update the Markdown record and influence later recommendations.
+
+Each report is named for the weekday when it is meant to be read. Sunday
+evening opens Monday's digest, and each Monday-through-Thursday evening opens
+the following weekday's digest. Friday night and Saturday do not create a new
+cycle. Reports separately show the actual arXiv announcement, the submission
+window searched, and when the search ran. A missing digest remains searchable
+during its reading day. Missed cycles widen the metadata window while existing
+history prevents duplicate recommendations.
 
 ## Files
 
@@ -56,8 +71,7 @@ Application files and the private runtime:
 Spotlight launchers:
 
 ```text
-~/Applications/arXiv Hub.command
-~/Applications/Configure arXiv Hub.command
+~/Applications/ArXiv Go.command
 ```
 
 Default user data:
@@ -68,8 +82,8 @@ Default user data:
 ~/Documents/arXiv Hub/Papers Archive
 ```
 
-Use `Configure arXiv Hub` from Spotlight to reopen the setup wizard. Existing
-reports and papers are not moved automatically when paths change.
+Use **Configure interests** on the dashboard to reopen the setup wizard.
+Existing reports and papers are not moved automatically when paths change.
 
 ## Update And Uninstall
 
@@ -89,6 +103,11 @@ papers. A profile backup is placed in `~/Documents/arXiv Hub/`.
 - The viewer listens only on `127.0.0.1` and uses a random session token.
 - PDF downloads validate canonical arXiv redirects, content type, signature,
   and size before atomic installation.
+- Report ratings and manual filename markers such as `[!!!]`, `[!!]`, `[!]`,
+  `[skip]`, and `[unrated]` are preference signals; the most recently changed
+  explicit signal controls ranking, with report ratings winning timestamp ties.
+- New downloads do not receive an automatic rating prefix. Manual prefixes are
+  preserved during reconciliation and version upgrades.
 - No telemetry is collected.
 
 See [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md), and

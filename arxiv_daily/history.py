@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -83,19 +83,32 @@ def extract_arxiv_id(value: str) -> str | None:
     return None
 
 
-def annotation_weight(filename: str) -> float:
+def annotation_marker(filename: str) -> str | None:
     explicit = re.search(
         r"\[(high|medium|low|skip|unrated)\]",
         filename,
         re.IGNORECASE,
     )
     if explicit:
-        return RATING_WEIGHTS[explicit.group(1).lower()]
+        return explicit.group(1).lower()
     if "[!!!]" in filename:
-        return 4.0
+        return "!!!"
     if "[!!]" in filename:
-        return 3.0
+        return "!!"
     if "[!]" in filename:
+        return "!"
+    return None
+
+
+def annotation_weight(filename: str) -> float:
+    marker = annotation_marker(filename)
+    if marker in RATING_WEIGHTS:
+        return RATING_WEIGHTS[marker]
+    if marker == "!!!":
+        return 4.0
+    if marker == "!!":
+        return 3.0
+    if marker == "!":
         return 2.0
     return 1.0
 
@@ -123,15 +136,29 @@ def scan_library(roots: Iterable[Path], limit: int) -> list[LibraryItem]:
             arxiv_id = extract_arxiv_id(path.name)
             if arxiv_id is None:
                 continue
+            marker = annotation_marker(path.name)
+            stat = path.stat()
             items.append(
                 LibraryItem(
                     arxiv_id=arxiv_id,
                     weight=annotation_weight(path.name),
                     observed_date=_observed_date(path),
                     path=str(path),
+                    explicit=marker is not None,
+                    fingerprint=marker or "unmarked",
+                    changed_at=datetime.fromtimestamp(
+                        stat.st_ctime,
+                        tz=timezone.utc,
+                    ),
                 )
             )
-    items.sort(key=lambda item: (item.observed_date, item.path), reverse=True)
+    items.sort(
+        key=lambda item: (
+            item.changed_at or datetime.min.replace(tzinfo=timezone.utc),
+            item.path,
+        ),
+        reverse=True,
+    )
     unique: list[LibraryItem] = []
     seen: set[str] = set()
     for item in items:
@@ -175,6 +202,7 @@ def parse_report_history(record_dir: Path, limit: int) -> list[InterestPaper]:
     paths = sorted(record_dir.glob("????-??-??.md"), reverse=True)
     for path in paths:
         text = path.read_text(encoding="utf-8")
+        changed_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         matches = list(RECORD_RE.finditer(text))
         for index, match in enumerate(matches):
             try:
@@ -193,6 +221,8 @@ def parse_report_history(record_dir: Path, limit: int) -> list[InterestPaper]:
                     paper=paper,
                     weight=RATING_WEIGHTS[rating],
                     observed_date=_report_date(path),
+                    fingerprint=f"{path.name}:{rating}",
+                    changed_at=changed_at,
                 )
             )
             if len(history) >= limit:

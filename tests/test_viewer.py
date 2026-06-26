@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -17,6 +17,7 @@ from arxiv_daily.viewer import (
     create_server,
     generate_html_companion,
     list_report_dates,
+    paginate_report_dates,
     update_report_rating,
 )
 from arxiv_daily.downloader import DownloadStatus
@@ -35,6 +36,32 @@ REPORT = """# Daily arXiv Recommendations — 2026-06-08
 
 
 class ViewerRenderingTests(unittest.TestCase):
+    def test_report_pagination_uses_seven_dates_and_compact_tokens(self) -> None:
+        dates = [f"2026-06-{day:02d}" for day in range(30, 9, -1)]
+
+        first = paginate_report_dates(dates, "1")
+        middle = paginate_report_dates(dates, "2")
+        last = paginate_report_dates(dates, "999")
+
+        self.assertEqual(first.dates, tuple(dates[:7]))
+        self.assertEqual(first.page, 1)
+        self.assertEqual(first.total_pages, 3)
+        self.assertEqual(first.tokens, (1, 2, 3))
+        self.assertEqual(middle.dates, tuple(dates[7:14]))
+        self.assertEqual(last.page, 3)
+        self.assertEqual(last.dates, tuple(dates[14:]))
+
+    def test_report_pagination_normalizes_invalid_values_and_uses_ellipses(
+        self,
+    ) -> None:
+        dates = [f"report-{index:03d}" for index in range(140, 0, -1)]
+
+        invalid = paginate_report_dates(dates, "not-a-page")
+        middle = paginate_report_dates(dates, "10")
+
+        self.assertEqual(invalid.page, 1)
+        self.assertEqual(middle.tokens, (1, None, 9, 10, 11, None, 20))
+
     def test_lists_only_dated_markdown_reports_newest_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -59,7 +86,7 @@ class ViewerRenderingTests(unittest.TestCase):
         self.assertIn("$E = m c^2$", html)
         self.assertIn(r"\[x^2\]", html)
         self.assertIn("katex.min.css", html)
-        self.assertIn("Open with arXiv Hub.command to change ratings", html)
+        self.assertIn("Open with ArXiv Go.command to change ratings", html)
         self.assertIn('data-rating="high"', html)
         self.assertIn('data-rating="medium"', html)
         self.assertIn('data-rating="low"', html)
@@ -112,7 +139,7 @@ class ViewerRenderingTests(unittest.TestCase):
             "Wait for the active job to finish before closing.",
             html,
         )
-        self.assertNotIn("Open with arXiv Hub.command", html)
+        self.assertNotIn("Open with ArXiv Go.command", html)
 
     def test_arxiv_id_links_to_abstract_page_separately_from_pdf(self) -> None:
         html = generate_html_companion(
@@ -178,6 +205,16 @@ class ViewerRatingTests(unittest.TestCase):
             self.assertIn("**Interest:** low", result)
             self.assertIn("Inline $E = m c^2$", result)
             self.assertEqual(list(Path(tmp).glob(".*.tmp")), [])
+            signal_payload = json.loads(
+                (Path(tmp) / ".state" / "preference-signals.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            report_signal = signal_payload["signals"]["2606.00001"]["report"]
+            self.assertEqual(
+                report_signal["fingerprint"],
+                "2026-06-08.md:low",
+            )
 
     def test_rejects_invalid_rating_unknown_paper_and_invalid_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +300,9 @@ class ViewerServerTests(unittest.TestCase):
             assets_dir=assets,
             token="test-token",
             port=0,
+            supervisor_handoff_url=(
+                "http://127.0.0.1:9001/?token=bridge&after=1"
+            ),
             now_provider=lambda: datetime(
                 2026, 6, 9, 20, 0, tzinfo=ZoneInfo("America/Chicago")
             ),
@@ -375,6 +415,38 @@ class ViewerServerTests(unittest.TestCase):
         self.assertIn("Start searching", html)
         self.assertNotIn("/api/download/", html)
 
+    def test_index_paginates_seven_reports_and_preserves_token(self) -> None:
+        for day in range(9, 17):
+            (self.root / f"2026-06-{day:02d}.md").write_text(
+                REPORT,
+                encoding="utf-8",
+            )
+
+        with urllib.request.urlopen(
+            f"{self.base}/?page=2&token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertNotIn("Tuesday, June 16, 2026", html)
+        self.assertIn("Tuesday, June 9, 2026", html)
+        self.assertIn("?page=1&amp;token=test-token", html)
+        self.assertIn('aria-current="page"', html)
+        self.assertIn('class="pagination"', html)
+        self.assertIn("flex-wrap:wrap", html)
+
+    def test_search_completion_returns_dashboard_to_first_page(self) -> None:
+        with urllib.request.urlopen(
+            f"{self.base}/?page=2&token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertIn(
+            "window.location.href = `/?page=1&token=${encodeURIComponent(token)}`",
+            html,
+        )
+
     def test_index_places_aligned_actions_above_report_dates(self) -> None:
         (self.root / "2026-06-09.md").write_text(REPORT, encoding="utf-8")
         with urllib.request.urlopen(
@@ -393,7 +465,11 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertIn(
-            "grid-template-columns:repeat(2,minmax(0,1fr))",
+            '<button id="configure-interests" class="primary-action">',
+            html,
+        )
+        self.assertIn(
+            "grid-template-columns:repeat(3,minmax(0,1fr))",
             html,
         )
         self.assertIn(
@@ -401,7 +477,7 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertIn(
-            "closeButton.disabled = searchBusy;",
+            "configureButton.disabled = searchBusy;",
             html,
         )
         self.assertIn(
@@ -409,6 +485,74 @@ class ViewerServerTests(unittest.TestCase):
             html,
         )
         self.assertLess(html.index("2026-06-09"), html.index("2026-06-08"))
+
+    def test_configure_reuses_current_tab_through_supervisor_bridge(self) -> None:
+        with urllib.request.urlopen(
+            f"{self.base}/?token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertIn("const supervisorHandoffUrl =", html)
+        self.assertIn(
+            '"http://127.0.0.1:9001/?token=bridge&after=1";',
+            html,
+        )
+        self.assertIn(
+            "window.location.replace(supervisorHandoffUrl)",
+            html,
+        )
+        self.assertNotIn("window.open(supervisorHandoffUrl", html)
+
+    def test_empty_index_shows_no_reports_state(self) -> None:
+        (self.root / "2026-06-08.md").unlink()
+
+        with urllib.request.urlopen(
+            f"{self.base}/?token=test-token",
+            timeout=2,
+        ) as response:
+            html = response.read().decode("utf-8")
+
+        self.assertIn("No reports yet", html)
+        self.assertIn('id="configure-interests"', html)
+        self.assertNotIn("Open report", html)
+
+    def test_configure_endpoint_stops_server_with_configure_action(self) -> None:
+        with self._post("/api/configure", {}) as response:
+            self.assertEqual(response.status, 200)
+
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.server.action, "configure")
+
+    def test_configure_endpoint_is_blocked_while_download_runs(self) -> None:
+        with self._post(
+            "/api/download/start",
+            {"date": "2026-06-08"},
+        ) as response:
+            self.assertEqual(response.status, 202)
+        self.assertTrue(self.download_started.wait(timeout=1))
+
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/configure", {})
+
+        self.assertEqual(caught.exception.code, 409)
+        self.download_release.set()
+
+    def test_configure_endpoint_requires_token_and_same_origin(self) -> None:
+        for token, origin in [
+            ("wrong", self.base),
+            ("test-token", "https://malicious.example"),
+        ]:
+            with self.subTest(token=token, origin=origin):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    self._post(
+                        "/api/configure",
+                        {},
+                        token=token,
+                        origin=origin,
+                    )
+                self.assertIn(caught.exception.code, {403, 404})
 
     def test_download_status_reports_date_pending_count_and_card_state(self) -> None:
         status = self._get_json("/api/download/status?date=2026-06-08")
@@ -600,10 +744,10 @@ class ViewerServerTests(unittest.TestCase):
 
         self.assertEqual(status["state"], "idle")
         self.assertTrue(status["enabled"])
-        self.assertEqual(status["date"], "2026-06-09")
+        self.assertEqual(status["date"], "2026-06-10")
 
     def test_existing_today_report_disables_search(self) -> None:
-        (self.root / "2026-06-09.md").write_text(REPORT, encoding="utf-8")
+        (self.root / "2026-06-10.md").write_text(REPORT, encoding="utf-8")
 
         status = self._get_json("/api/search/status")
 
@@ -617,8 +761,8 @@ class ViewerServerTests(unittest.TestCase):
         def search_runner(run_date: object) -> SearchResult:
             started.set()
             release.wait(timeout=2)
-            (self.root / "2026-06-09.md").write_text(REPORT, encoding="utf-8")
-            return SearchResult("written", "Today's report is ready.")
+            (self.root / "2026-06-10.md").write_text(REPORT, encoding="utf-8")
+            return SearchResult("written", "Wednesday's digest is ready.")
 
         self.server.search_runner = search_runner
         with self._post("/api/search/start", {}) as response:
@@ -663,6 +807,7 @@ class ViewerServerTests(unittest.TestCase):
             completed["message"],
             'arXiv rate limit persisted after 90 seconds; <b>no report</b>.',
         )
+        self.assertTrue(completed["enabled"])
         with urllib.request.urlopen(
             f"{self.base}/?token=test-token",
             timeout=2,
@@ -677,6 +822,7 @@ class ViewerEarlySearchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root / "2026-06-08.md").write_text(REPORT, encoding="utf-8")
+        (self.root / "2026-06-09.md").write_text(REPORT, encoding="utf-8")
         assets = self.root / "assets"
         assets.mkdir()
         self.runner = Mock(
@@ -717,20 +863,52 @@ class ViewerEarlySearchTests(unittest.TestCase):
         )
         return urllib.request.urlopen(request, timeout=2)
 
-    def test_search_is_disabled_and_rejected_before_eight_pm(self) -> None:
+    def test_completed_current_digest_is_disabled_before_eight_pm(self) -> None:
         with urllib.request.urlopen(
             f"{self.base}/api/search/status?token=test-token",
             timeout=2,
         ) as response:
             status = json.loads(response.read())
 
-        self.assertEqual(status["state"], "too-early")
+        self.assertEqual(status["date"], "2026-06-09")
+        self.assertEqual(status["state"], "ready")
         self.assertFalse(status["enabled"])
+        self.assertIn("Tuesday's digest is complete", status["message"])
         self.assertIn("8:00 PM", status["message"])
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self._post("/api/search/start", {})
-        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(caught.exception.code, 409)
         self.runner.assert_not_called()
+
+    def test_missing_current_digest_is_searchable_before_eight_pm(self) -> None:
+        (self.root / "2026-06-09.md").unlink()
+
+        with urllib.request.urlopen(
+            f"{self.base}/api/search/status?token=test-token",
+            timeout=2,
+        ) as response:
+            status = json.loads(response.read())
+
+        self.assertEqual(status["date"], "2026-06-09")
+        self.assertEqual(status["state"], "idle")
+        self.assertTrue(status["enabled"])
+        self.assertIn("Tuesday, June 9", status["message"])
+        with self._post("/api/search/start", {}) as response:
+            self.assertEqual(response.status, 202)
+
+        deadline = monotonic() + 2
+        while monotonic() < deadline:
+            with urllib.request.urlopen(
+                f"{self.base}/api/search/status?token=test-token",
+                timeout=2,
+            ) as response:
+                completed = json.loads(response.read())
+            if completed["state"] == "skipped":
+                break
+            sleep(0.02)
+        self.assertEqual(completed["state"], "skipped")
+        self.assertTrue(completed["enabled"])
+        self.runner.assert_called_once_with(date(2026, 6, 9))
 
     def test_rating_edits_still_work_before_eight_pm(self) -> None:
         with self._post(
@@ -747,6 +925,82 @@ class ViewerEarlySearchTests(unittest.TestCase):
             "**Interest:** high",
             (self.root / "2026-06-08.md").read_text(encoding="utf-8"),
         )
+
+
+class ViewerWeekendCatchUpTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        assets = self.root / "assets"
+        assets.mkdir()
+        self.runner = Mock(
+            return_value=SearchResult(
+                "skipped",
+                "No new digest was created.",
+            )
+        )
+        self.server = create_server(
+            record_dir=self.root,
+            assets_dir=assets,
+            token="test-token",
+            port=0,
+            now_provider=lambda: datetime(
+                2026, 6, 15, 9, 0, tzinfo=ZoneInfo("America/Chicago")
+            ),
+            search_runner=self.runner,
+        )
+        self.thread = Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.temp.cleanup()
+
+    def test_monday_morning_targets_monday_digest(self) -> None:
+        with urllib.request.urlopen(
+            f"{self.base}/api/search/status?token=test-token",
+            timeout=2,
+        ) as response:
+            status = json.loads(response.read())
+
+        self.assertEqual(status["date"], "2026-06-15")
+        self.assertTrue(status["enabled"])
+        self.assertEqual(
+            status["button_label"],
+            "Search for Monday, June 15 digest",
+        )
+        self.assertIn("Monday, June 15", status["message"])
+
+    def test_existing_monday_report_disables_monday_morning_search(self) -> None:
+        (self.root / "2026-06-15.md").write_text(REPORT, encoding="utf-8")
+
+        with urllib.request.urlopen(
+            f"{self.base}/api/search/status?token=test-token",
+            timeout=2,
+        ) as response:
+            status = json.loads(response.read())
+
+        self.assertEqual(status["date"], "2026-06-15")
+        self.assertEqual(status["state"], "ready")
+        self.assertFalse(status["enabled"])
+        self.assertIn("Monday's digest is complete", status["message"])
+        self.assertIn("8:00 PM", status["message"])
+
+
+class ViewerLegacyReportTests(unittest.TestCase):
+    def test_legacy_report_explains_that_filename_was_not_announcement_date(self) -> None:
+        html = generate_html_companion(
+            REPORT,
+            report_date="2026-06-12",
+            interactive=False,
+        )
+
+        self.assertIn("Legacy date note", html)
+        self.assertIn("newest submission date", html)
+        self.assertIn("not an arXiv announcement date", html)
 
 
 if __name__ == "__main__":

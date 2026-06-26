@@ -8,8 +8,7 @@ UV_DIR="$APP_SUPPORT/bin"
 UV_PYTHON_INSTALL_DIR="$APP_SUPPORT/python"
 PROFILE_PATH="$APP_SUPPORT/profile.toml"
 LAUNCHER_DIR="$HOME/Applications"
-LAUNCHER_PATH="$LAUNCHER_DIR/arXiv Hub.command"
-CONFIGURE_PATH="$LAUNCHER_DIR/Configure arXiv Hub.command"
+LAUNCHER_PATH="$LAUNCHER_DIR/ArXiv Go.command"
 SOURCE_DIR="${0:A:h}"
 UV_VERSION="0.11.21"
 
@@ -72,15 +71,13 @@ print "Creating the private environment..."
 "$UV" venv --python 3.12 "$NEW_VENV"
 "$UV" pip sync --python "$NEW_VENV/bin/python" "$NEW_APP/requirements.lock"
 
-if [[ ! -f "$PROFILE_PATH" ]]; then
-  print "Opening the setup wizard in your default browser..."
-  "$NEW_VENV/bin/python" "$NEW_APP/scripts/setup_profile.py" \
+if [[ -f "$PROFILE_PATH" ]]; then
+  print "Verifying the pinned SPECTER2 model..."
+  "$NEW_VENV/bin/python" "$NEW_APP/scripts/verify_model.py" \
     --profile "$PROFILE_PATH"
+else
+  print "First-run setup will open when arXiv Hub is launched."
 fi
-
-print "Downloading and verifying the pinned SPECTER2 model..."
-"$NEW_VENV/bin/python" "$NEW_APP/scripts/verify_model.py" \
-  --profile "$PROFILE_PATH"
 
 SWITCH_STARTED=1
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
@@ -94,13 +91,25 @@ mv "$NEW_APP" "$APP_DIR"
 mv "$NEW_VENV" "$VENV_DIR"
 SWITCH_COMPLETE=1
 
-ditto "$SOURCE_DIR/launcher/arXiv Hub.command" "$LAUNCHER_PATH"
-ditto "$SOURCE_DIR/launcher/Configure arXiv Hub.command" "$CONFIGURE_PATH"
+if [[ -f "$PROFILE_PATH" ]]; then
+  print "Migrating confirmed legacy download names..."
+  "$VENV_DIR/bin/python" "$APP_DIR/scripts/migrate_download_prefixes.py" \
+    --profile "$PROFILE_PATH"
+fi
+
+ditto "$SOURCE_DIR/launcher/ArXiv Go.launcher.zsh" "$LAUNCHER_PATH"
 chmod 755 "$LAUNCHER_PATH"
-chmod 755 "$CONFIGURE_PATH"
+if [[ ! -x "$LAUNCHER_PATH" ]] || \
+   ! grep -q "scripts/launch_hub.py" "$LAUNCHER_PATH"; then
+  print -u2 "The Spotlight launcher could not be verified."
+  exit 2
+fi
+rm -f "$LAUNCHER_DIR/arXiv Hub.command"
+rm -f "$LAUNCHER_DIR/Configure arXiv Hub.command"
+/usr/bin/mdimport -i "$LAUNCHER_PATH" >/dev/null 2>&1 || true
 
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
 print ""
 print "arXiv Hub is ready."
-print "Open Spotlight and type: arXiv Hub"
+print "Open Spotlight and type: ArXiv Go"
 read -k 1 "?Press any key to close."

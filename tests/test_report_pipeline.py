@@ -6,11 +6,12 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from arxiv_daily.models import Paper, RankedPaper
 from arxiv_daily.pipeline import DailyPipeline, PipelineError
 from arxiv_daily.report import ExistingReportError, render_report, write_report_atomic
-from arxiv_daily.state import RecommenderState
+from arxiv_daily.state import MetadataCache, RecommenderState
 
 
 def sample_paper(arxiv_id: str = "2606.00001") -> Paper:
@@ -44,15 +45,29 @@ class ReportTests(unittest.TestCase):
         )
 
         text = render_report(
-            run_date=date(2026, 6, 8),
-            announcement_date=date(2026, 6, 8),
+            digest_date=date(2026, 6, 15),
+            announcement_at=datetime(
+                2026, 6, 14, 20, tzinfo=ZoneInfo("America/New_York")
+            ),
             query_start=date(2026, 6, 1),
+            query_end=date(2026, 6, 12),
             fetched_at=datetime(2026, 6, 8, 12, tzinfo=timezone.utc),
+            timezone_name="America/Chicago",
             candidate_count=42,
             model_label="allenai/specter2_base@revision + proximity@revision",
             selected=[item],
         )
 
+        self.assertIn("Digest for:** Monday, June 15, 2026", text)
+        self.assertIn(
+            "arXiv announcement:** Sunday, June 14, 2026 at 8:00 PM EDT",
+            text,
+        )
+        self.assertIn("7:00 PM CDT", text)
+        self.assertIn("Submissions searched:** 2026-06-01 to 2026-06-12", text)
+        self.assertIn("Search performed:", text)
+        self.assertIn("<!-- arxiv-digest:", text)
+        self.assertNotIn("Announcement batch", text)
         self.assertIn("## 1. [Verified Neutron-Star Paper]", text)
         self.assertIn("2606.00001v1", text)
         self.assertIn("**Interest:** unrated", text)
@@ -78,10 +93,14 @@ class ReportTests(unittest.TestCase):
         )
 
         text = render_report(
-            run_date=date(2026, 6, 8),
-            announcement_date=date(2026, 6, 8),
+            digest_date=date(2026, 6, 8),
+            announcement_at=datetime(
+                2026, 6, 7, 20, tzinfo=ZoneInfo("America/New_York")
+            ),
             query_start=date(2026, 6, 1),
+            query_end=date(2026, 6, 5),
             fetched_at=datetime(2026, 6, 8, 12, tzinfo=timezone.utc),
+            timezone_name="America/Chicago",
             candidate_count=1,
             model_label="verified-model",
             selected=[item],
@@ -118,10 +137,14 @@ class ReportTests(unittest.TestCase):
         )
 
         text = render_report(
-            run_date=date(2026, 6, 8),
-            announcement_date=date(2026, 6, 8),
+            digest_date=date(2026, 6, 8),
+            announcement_at=datetime(
+                2026, 6, 7, 20, tzinfo=ZoneInfo("America/New_York")
+            ),
             query_start=date(2026, 6, 1),
+            query_end=date(2026, 6, 5),
             fetched_at=datetime(2026, 6, 8, 12, tzinfo=timezone.utc),
+            timezone_name="America/Chicago",
             candidate_count=1,
             model_label="verified-model",
             selected=[item],
@@ -200,13 +223,21 @@ class ReportTests(unittest.TestCase):
 
 
 class FakeSource:
-    def __init__(self, papers: list[Paper] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        papers: list[Paper] | None = None,
+        error: Exception | None = None,
+        by_id: dict[str, Paper] | None = None,
+    ):
         self.papers = papers or []
         self.error = error
+        self.by_id = by_id or {}
         self.fetch_count = 0
+        self.fetch_windows: list[tuple[date, date]] = []
 
     def fetch_candidates(self, start: date, end: date) -> list[Paper]:
         self.fetch_count += 1
+        self.fetch_windows.append((start, end))
         if self.error:
             raise self.error
         return self.papers
@@ -214,7 +245,11 @@ class FakeSource:
     def fetch_by_ids(self, arxiv_ids: list[str]) -> list[Paper]:
         if self.error:
             raise self.error
-        return []
+        return [
+            self.by_id[arxiv_id]
+            for arxiv_id in arxiv_ids
+            if arxiv_id in self.by_id
+        ]
 
 
 class FakeEmbedder:
@@ -230,6 +265,55 @@ class FakeEmbedder:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_state_migrates_without_reinterpreting_legacy_announcement_date(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            path.write_text(
+                '{"seen_ids":["2606.00001"],'
+                '"last_announcement_date":"2026-06-12"}',
+                encoding="utf-8",
+            )
+
+            state = RecommenderState.load(path)
+            state.last_digest_date = date(2026, 6, 15)
+            state.save(path)
+            reloaded = RecommenderState.load(path)
+
+            self.assertEqual(reloaded.last_announcement_date, date(2026, 6, 12))
+            self.assertEqual(reloaded.last_digest_date, date(2026, 6, 15))
+            self.assertEqual(reloaded.seen_ids, {"2606.00001"})
+
+    def test_verified_seed_folder_papers_join_interest_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            seed.mkdir()
+            (seed / "[!!!] 2501.00001v1.pdf").write_bytes(b"%PDF-test")
+            seed_paper = sample_paper("2501.00001")
+            source = FakeSource(by_id={seed_paper.arxiv_id: seed_paper})
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+            )
+            pipeline.config = replace(
+                pipeline.config,
+                seed_library_dir=seed,
+                seed_library_limit=100,
+            )
+
+            interests = pipeline._load_interests(
+                date(2026, 6, 12),
+                MetadataCache(root / ".state" / "metadata.json"),
+            )
+
+            self.assertEqual(
+                [(item.paper.arxiv_id, item.weight) for item in interests],
+                [("2501.00001", 4.0)],
+            )
+
     def test_weekend_creates_no_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pipeline = DailyPipeline.minimal(
@@ -245,8 +329,8 @@ class PipelineTests(unittest.TestCase):
     def test_stale_batch_creates_no_file(self) -> None:
         stale = sample_paper()
         stale = stale.with_dates(
-            published=datetime(2026, 6, 5, tzinfo=timezone.utc),
-            updated=datetime(2026, 6, 5, tzinfo=timezone.utc),
+            published=datetime(2026, 6, 3, tzinfo=timezone.utc),
+            updated=datetime(2026, 6, 3, tzinfo=timezone.utc),
         )
         with tempfile.TemporaryDirectory() as tmp:
             pipeline = DailyPipeline.minimal(
@@ -262,7 +346,21 @@ class PipelineTests(unittest.TestCase):
     def test_source_or_model_failure_writes_no_daily_file(self) -> None:
         for source, embedder in [
             (FakeSource(error=RuntimeError("bad atom")), FakeEmbedder()),
-            (FakeSource([sample_paper()]), FakeEmbedder(error=RuntimeError("model"))),
+            (
+                FakeSource(
+                    [
+                        sample_paper().with_dates(
+                            published=datetime(
+                                2026, 6, 5, tzinfo=timezone.utc
+                            ),
+                            updated=datetime(
+                                2026, 6, 5, tzinfo=timezone.utc
+                            ),
+                        )
+                    ]
+                ),
+                FakeEmbedder(error=RuntimeError("model")),
+            ),
         ]:
             with self.subTest(source=source, embedder=embedder):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -288,12 +386,116 @@ class PipelineTests(unittest.TestCase):
                 embedder=FakeEmbedder(),
                 threshold=0.0,
             )
-            result = pipeline.run(date(2026, 6, 8), dry_run=True)
+            result = pipeline.run(date(2026, 6, 9), dry_run=True)
 
             self.assertEqual(result.status, "dry-run")
             self.assertIn("2606.00001v1", result.report_text)
             self.assertIn("2606.00002v1", result.report_text)
             self.assertEqual(list(Path(tmp).glob("*.md")), [])
+
+    def test_consecutive_weekday_report_keeps_normal_backfill_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-06-08.md").write_text("existing", encoding="utf-8")
+            source = FakeSource([sample_paper()])
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+                threshold=0.0,
+            )
+
+            pipeline.run(date(2026, 6, 9), dry_run=True)
+
+            self.assertEqual(
+                source.fetch_windows,
+                [(date(2026, 6, 1), date(2026, 6, 8))],
+            )
+
+    def test_monday_digest_queries_through_friday_submission_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paper = sample_paper().with_dates(
+                published=datetime(2026, 6, 12, tzinfo=timezone.utc),
+                updated=datetime(2026, 6, 12, tzinfo=timezone.utc),
+            )
+            source = FakeSource([paper])
+            pipeline = DailyPipeline.minimal(
+                record_dir=Path(tmp),
+                source=source,
+                embedder=FakeEmbedder(),
+                threshold=0.0,
+            )
+
+            result = pipeline.run(date(2026, 6, 15), dry_run=True)
+
+            self.assertEqual(
+                source.fetch_windows,
+                [(date(2026, 6, 5), date(2026, 6, 12))],
+            )
+            self.assertIn("Digest for:** Monday, June 15, 2026", result.report_text)
+            self.assertIn(
+                "Submissions searched:** 2026-06-05 to 2026-06-12",
+                result.report_text,
+            )
+
+    def test_missing_weekday_extends_backfill_by_one_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-06-05.md").write_text("existing", encoding="utf-8")
+            source = FakeSource([sample_paper()])
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+                threshold=0.0,
+            )
+
+            pipeline.run(date(2026, 6, 9), dry_run=True)
+
+            self.assertEqual(
+                source.fetch_windows,
+                [(date(2026, 5, 31), date(2026, 6, 8))],
+            )
+
+    def test_multiple_missing_weekdays_extend_backfill_without_counting_weekend(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-06-04.md").write_text("existing", encoding="utf-8")
+            source = FakeSource([sample_paper()])
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+                threshold=0.0,
+            )
+
+            pipeline.run(date(2026, 6, 9), dry_run=True)
+
+            self.assertEqual(
+                source.fetch_windows,
+                [(date(2026, 5, 30), date(2026, 6, 8))],
+            )
+
+    def test_adaptive_backfill_is_capped_at_thirty_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026-04-01.md").write_text("existing", encoding="utf-8")
+            source = FakeSource([sample_paper()])
+            pipeline = DailyPipeline.minimal(
+                record_dir=root,
+                source=source,
+                embedder=FakeEmbedder(),
+                threshold=0.0,
+            )
+
+            pipeline.run(date(2026, 6, 9), dry_run=True)
+
+            self.assertEqual(
+                source.fetch_windows,
+                [(date(2026, 5, 9), date(2026, 6, 8))],
+            )
 
     def test_existing_report_fails_before_network_without_force(self) -> None:
         source = FakeSource([sample_paper()])
@@ -332,10 +534,14 @@ class PipelineTests(unittest.TestCase):
             root = Path(tmp)
             (root / "2026-06-05.md").write_text(
                 render_report(
-                    run_date=date(2026, 6, 5),
-                    announcement_date=date(2026, 6, 5),
+                    digest_date=date(2026, 6, 5),
+                    announcement_at=datetime(
+                        2026, 6, 4, 20, tzinfo=ZoneInfo("America/New_York")
+                    ),
                     query_start=date(2026, 5, 29),
+                    query_end=date(2026, 6, 4),
                     fetched_at=datetime(2026, 6, 5, tzinfo=timezone.utc),
+                    timezone_name="America/Chicago",
                     candidate_count=1,
                     model_label="fake",
                     selected=[prior_item],
@@ -349,7 +555,7 @@ class PipelineTests(unittest.TestCase):
                 threshold=0.0,
             )
 
-            result = pipeline.run(date(2026, 6, 8), dry_run=True)
+            result = pipeline.run(date(2026, 6, 9), dry_run=True)
 
             self.assertIn("2606.00002v1", result.report_text)
             self.assertNotIn("2606.00001v1", result.report_text)
@@ -370,10 +576,10 @@ class PipelineTests(unittest.TestCase):
                 side_effect=OSError("disk failure"),
             ):
                 with self.assertRaises(PipelineError):
-                    pipeline.run(date(2026, 6, 8))
+                    pipeline.run(date(2026, 6, 9))
 
-            self.assertFalse((root / "2026-06-08.md").exists())
-            self.assertFalse((root / "2026-06-08.html").exists())
+            self.assertFalse((root / "2026-06-09.md").exists())
+            self.assertFalse((root / "2026-06-09.html").exists())
 
     def test_successful_run_writes_markdown_and_html_companion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -385,15 +591,19 @@ class PipelineTests(unittest.TestCase):
                 threshold=0.0,
             )
 
-            result = pipeline.run(date(2026, 6, 8))
+            result = pipeline.run(date(2026, 6, 9))
 
             self.assertEqual(result.status, "written")
-            self.assertTrue((root / "2026-06-08.md").is_file())
-            html_path = root / "2026-06-08.html"
+            self.assertTrue((root / "2026-06-09.md").is_file())
+            html_path = root / "2026-06-09.html"
             self.assertTrue(html_path.is_file())
             html = html_path.read_text(encoding="utf-8")
             self.assertIn("Verified Neutron-Star Paper", html)
-            self.assertIn("Open with arXiv Hub.command", html)
+            self.assertIn("Open with ArXiv Go.command", html)
+            self.assertIn("Digest for", html)
+            self.assertIn("arXiv announcement", html)
+            self.assertIn("Submissions searched", html)
+            self.assertNotIn("Legacy date note", html)
 
     def test_html_failure_rolls_back_markdown_state_and_companion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,10 +620,10 @@ class PipelineTests(unittest.TestCase):
                 side_effect=OSError("html disk failure"),
             ):
                 with self.assertRaises(PipelineError):
-                    pipeline.run(date(2026, 6, 8))
+                    pipeline.run(date(2026, 6, 9))
 
-            self.assertFalse((root / "2026-06-08.md").exists())
-            self.assertFalse((root / "2026-06-08.html").exists())
+            self.assertFalse((root / "2026-06-09.md").exists())
+            self.assertFalse((root / "2026-06-09.html").exists())
             self.assertFalse((root / ".state" / "state.json").exists())
 
 

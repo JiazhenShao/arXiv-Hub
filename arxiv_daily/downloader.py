@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import unicodedata
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -44,6 +46,10 @@ RATING_TAGS = {
 }
 RATINGS = {"high", "medium", "low", "skip", "unrated"}
 SELECTED_CROSS_LISTS = frozenset({"hep-ph", "nucl-th"})
+MANUAL_RATING_PREFIX_RE = re.compile(
+    r"^(\[(?:!!!|!!|!|high|medium|low|skip|unrated)\])",
+    re.IGNORECASE,
+)
 
 
 class DownloadError(RuntimeError):
@@ -308,17 +314,44 @@ def managed_filename(
 ) -> str:
     concept_tags = candidate_concept_tags(candidate)
     category_tags = candidate_category_tags(candidate)
-    rating_tag = RATING_TAGS[candidate.rating]
-    prefix = f"[{rating_tag}]" + "".join(f"[{tag}]" for tag in concept_tags)
+    prefix = "".join(f"[{tag}]" for tag in concept_tags)
     safe_id = _safe_versioned_id(versioned_id or candidate.versioned_id)
     category_suffix = "".join(f"[{tag}]" for tag in category_tags)
     suffix = f" - {category_suffix}{safe_id}.pdf"
     title = _sanitize_title(candidate.paper.title)
-    while len(f"{prefix} {title}{suffix}".encode("utf-8")) > MAX_FILENAME_BYTES:
+    leading = f"{prefix} " if prefix else ""
+    while len(f"{leading}{title}{suffix}".encode("utf-8")) > MAX_FILENAME_BYTES:
         title = title[:-1].rstrip()
         if not title:
             raise DownloadError("Filename metadata exceeds safe length")
-    return f"{prefix} {title}{suffix}"
+    return f"{leading}{title}{suffix}"
+
+
+def legacy_managed_filename(
+    candidate: DownloadCandidate,
+    *,
+    versioned_id: str | None = None,
+    rating: str | None = None,
+) -> str:
+    rating_tag = RATING_TAGS[_canonical_rating(rating or candidate.rating)]
+    return f"[{rating_tag}]{managed_filename(candidate, versioned_id=versioned_id)}"
+
+
+def manual_rating_prefix(filename: str) -> str:
+    match = MANUAL_RATING_PREFIX_RE.match(filename)
+    return match.group(1) if match else ""
+
+
+def _filename_with_preserved_marker(
+    candidate: DownloadCandidate,
+    existing_name: str,
+    *,
+    versioned_id: str | None = None,
+) -> str:
+    return manual_rating_prefix(existing_name) + managed_filename(
+        candidate,
+        versioned_id=versioned_id,
+    )
 
 
 def _version_number(value: str) -> int:
@@ -358,6 +391,86 @@ class PaperDownloader:
         for path in self.library_dir.glob(".arxiv-download-*.tmp"):
             if path.is_file() and not path.is_symlink():
                 path.unlink()
+
+    def migrate_automatic_rating_prefixes(self) -> dict[str, DownloadStatus]:
+        manifest = DownloadManifest.load(self.manifest_path)
+        effective = collect_effective_papers(self.record_dir)
+        planned: list[tuple[str, Path, Path, DownloadEntry]] = []
+        statuses: dict[str, DownloadStatus] = {}
+        for arxiv_id, entry in manifest.entries.items():
+            candidate = effective.get(arxiv_id)
+            if candidate is None:
+                continue
+            expected = legacy_managed_filename(
+                candidate,
+                versioned_id=entry.versioned_id,
+                rating=entry.rating,
+            )
+            if entry.filename != expected:
+                continue
+            source = self.library_dir / entry.filename
+            destination = self.library_dir / managed_filename(
+                candidate,
+                versioned_id=entry.versioned_id,
+            )
+            if not source.is_file() or source.is_symlink():
+                statuses[arxiv_id] = DownloadStatus(
+                    "pending",
+                    "Legacy managed PDF is missing; migration deferred.",
+                    entry.filename,
+                )
+                continue
+            if destination.exists() and destination != source:
+                statuses[arxiv_id] = DownloadStatus(
+                    "conflict",
+                    "Prefix migration destination already exists.",
+                    entry.filename,
+                )
+                continue
+            planned.append((arxiv_id, source, destination, entry))
+        if not planned:
+            return statuses
+
+        backup_dir = self.state_dir / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        pdf_backup_dir = backup_dir / f"legacy-prefix-pdfs.{stamp}"
+        pdf_backup_dir.mkdir()
+        shutil.copy2(
+            self.manifest_path,
+            backup_dir / f"downloads.{stamp}.json",
+        )
+        for _, source, _, _ in planned:
+            backup_path = pdf_backup_dir / source.name
+            try:
+                os.link(source, backup_path)
+            except OSError:
+                shutil.copy2(source, backup_path)
+        completed: list[tuple[Path, Path]] = []
+        try:
+            for arxiv_id, source, destination, entry in planned:
+                os.replace(source, destination)
+                completed.append((destination, source))
+                manifest.set(
+                    arxiv_id=arxiv_id,
+                    versioned_id=entry.versioned_id,
+                    filename=destination.name,
+                    rating=entry.rating,
+                    tags=entry.tags,
+                    report_date=entry.report_date,
+                )
+                statuses[arxiv_id] = DownloadStatus(
+                    "migrated",
+                    "Removed confirmed legacy automatic rating prefix.",
+                    destination.name,
+                )
+            manifest.save()
+        except Exception:
+            for destination, source in reversed(completed):
+                if destination.exists() and not source.exists():
+                    os.replace(destination, source)
+            raise
+        return statuses
 
     def reconcile(self, report_date: str) -> dict[str, DownloadStatus]:
         self.library_dir.mkdir(parents=True, exist_ok=True)
@@ -402,8 +515,9 @@ class PaperDownloader:
                         continue
                     existing_version = _filename_version(existing.name)
                     managed_version = existing_version or candidate.versioned_id
-                    desired = managed_filename(
+                    desired = _filename_with_preserved_marker(
                         candidate,
+                        existing.name,
                         versioned_id=managed_version,
                     )
                     destination = self.library_dir / desired
@@ -438,13 +552,20 @@ class PaperDownloader:
 
             current = self.library_dir / entry.filename
             if not current.is_file() or current.is_symlink():
-                manifest.entries.pop(arxiv_id, None)
-                changed = True
-                statuses[arxiv_id] = DownloadStatus(
-                    "pending" if candidate.rating == "high" else "not-downloaded",
-                    "Managed PDF is missing.",
-                )
-                continue
+                matches = self._matching_files(arxiv_id)
+                if len(matches) == 1:
+                    current = matches[0]
+                else:
+                    manifest.entries.pop(arxiv_id, None)
+                    changed = True
+                    statuses[arxiv_id] = DownloadStatus(
+                        "conflict" if len(matches) > 1 else (
+                            "pending" if candidate.rating == "high" else "not-downloaded"
+                        ),
+                        "Multiple matching PDFs require manual cleanup."
+                        if len(matches) > 1 else "Managed PDF is missing.",
+                    )
+                    continue
             try:
                 _validate_pdf(current)
             except DownloadError as exc:
@@ -456,7 +577,11 @@ class PaperDownloader:
                 continue
 
             local_version = entry.versioned_id
-            desired = managed_filename(candidate, versioned_id=local_version)
+            desired = _filename_with_preserved_marker(
+                candidate,
+                current.name,
+                versioned_id=local_version,
+            )
             if current.name != desired:
                 destination = self.library_dir / desired
                 if destination.exists() and destination != current:
@@ -517,7 +642,8 @@ class PaperDownloader:
                 if old_entry is not None
                 else None
             )
-            filename = managed_filename(candidate)
+            marker = manual_rating_prefix(old_entry.filename) if old_entry else ""
+            filename = marker + managed_filename(candidate)
             destination = self.library_dir / filename
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=".arxiv-download-",

@@ -11,6 +11,7 @@ from arxiv_daily.downloader import (
     PaperDownloader,
     collect_effective_papers,
     managed_filename,
+    legacy_managed_filename,
 )
 
 
@@ -77,7 +78,7 @@ class EffectivePaperTests(unittest.TestCase):
 
         self.assertEqual(
             filename,
-            "[!!!][NS] "
+            "[NS] "
             "Identifiability of g-mode Resonances in Binary Neutron Stars "
             "- [astro-ph.HE][nucl-th]2606.11959v1.pdf",
         )
@@ -106,7 +107,7 @@ class EffectivePaperTests(unittest.TestCase):
 
             filename = managed_filename(candidate)
 
-        self.assertTrue(filename.startswith("[!!!][NS][EoS]"))
+        self.assertTrue(filename.startswith("[NS][EoS]"))
         self.assertIn("[EoS]", filename)
         self.assertTrue(
             filename.endswith(
@@ -129,33 +130,24 @@ class EffectivePaperTests(unittest.TestCase):
 
             filename = managed_filename(candidate)
 
-        self.assertTrue(filename.startswith("[!!!][RG]"))
+        self.assertTrue(filename.startswith("[RG]"))
         self.assertTrue(
             filename.endswith(" - [hep-ph][nucl-th]2606.11959v1.pdf")
         )
         self.assertEqual(filename.count("[hep-ph]"), 1)
 
-    def test_filename_rating_markers_are_symbolic_when_available(self) -> None:
-        expected = {
-            "high": "[!!!]",
-            "medium": "[!!]",
-            "low": "[!]",
-            "skip": "[skip]",
-            "unrated": "[unrated]",
-        }
+    def test_future_filenames_never_include_automatic_rating_markers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for rating, marker in expected.items():
+            for rating in ("high", "medium", "low", "skip", "unrated"):
                 report = root / f"2026-06-{10 + len(list(root.glob('*.md'))):02d}.md"
                 report.write_text(
                     report_entry(rating=rating),
                     encoding="utf-8",
                 )
                 candidate = collect_effective_papers(root)["2606.11959"]
-                self.assertTrue(
-                    managed_filename(candidate).startswith(marker),
-                    rating,
-                )
+                filename = managed_filename(candidate)
+                self.assertFalse(filename.startswith(("[!!!]", "[!!]", "[!]", "[skip]", "[unrated]")), rating)
 
     def test_filename_sanitizes_tex_and_stays_within_180_utf8_bytes(self) -> None:
         title = (
@@ -423,7 +415,7 @@ class ReconciliationTests(unittest.TestCase):
 
             self.assertEqual(result["2606.11959"].state, "existing")
             expected = library / (
-                "[!!!][NS] "
+                "[NS] "
                 "Identifiability of g-mode Resonances in Binary Neutron Stars "
                 "- [astro-ph.HE][nucl-th]2606.11959v1.pdf"
             )
@@ -454,7 +446,7 @@ class ReconciliationTests(unittest.TestCase):
             self.assertEqual(result["2606.11959"].state, "conflict")
             self.assertEqual(len(list(library.glob("*.pdf"))), 2)
 
-    def test_rating_change_renames_managed_file(self) -> None:
+    def test_rating_change_does_not_rename_managed_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             records = root / "records"
@@ -481,8 +473,63 @@ class ReconciliationTests(unittest.TestCase):
             result = downloader.reconcile("2026-06-10")
 
             self.assertEqual(result["2606.11959"].state, "downloaded")
-            self.assertFalse((library / old_name).exists())
-            self.assertEqual(len(list(library.glob("[[]!![]]*.pdf"))), 1)
+            self.assertTrue((library / old_name).exists())
+            self.assertEqual(len(list(library.glob("*.pdf"))), 1)
+
+    def test_reconcile_preserves_manual_marker_and_version_upgrade_carries_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            library = root / "library"
+            records.mkdir()
+            library.mkdir()
+            report_path = records / "2026-06-10.md"
+            report_path.write_text(report_entry(versioned_id="2606.11959v1"), encoding="utf-8")
+            candidate = collect_effective_papers(records)["2606.11959"]
+            manual_name = "[!!!]" + managed_filename(candidate)
+            (library / manual_name).write_bytes(b"%PDF-manual")
+            downloader = PaperDownloader(record_dir=records, library_dir=library, state_dir=records / ".state")
+            downloader.reconcile("2026-06-10")
+            report_path.write_text(report_entry(versioned_id="2606.11959v2"), encoding="utf-8")
+            downloader.fetcher = lambda candidate, destination: destination.write_bytes(b"%PDF-new")
+
+            result = downloader.download_high("2026-06-10")
+
+            self.assertEqual(result["2606.11959"].state, "downloaded")
+            upgraded = list(library.glob("[[]!!![]]*2606.11959v2.pdf"))
+            self.assertEqual(len(upgraded), 1)
+
+    def test_migration_removes_only_exact_manifest_confirmed_legacy_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            library = root / "library"
+            records.mkdir()
+            library.mkdir()
+            (records / "2026-06-10.md").write_text(report_entry(), encoding="utf-8")
+            candidate = collect_effective_papers(records)["2606.11959"]
+            legacy = legacy_managed_filename(candidate)
+            (library / legacy).write_bytes(b"%PDF-old")
+            manifest = DownloadManifest(records / ".state" / "downloads.json")
+            manifest.set(arxiv_id=candidate.arxiv_id, versioned_id=candidate.versioned_id, filename=legacy, rating="high", tags=(), report_date=candidate.report_date)
+            manifest.save()
+            unrelated = library / "[!!!] My Notes 2606.99999v1.pdf"
+            unrelated.write_bytes(b"%PDF-manual")
+            downloader = PaperDownloader(record_dir=records, library_dir=library, state_dir=records / ".state")
+
+            statuses = downloader.migrate_automatic_rating_prefixes()
+
+            self.assertEqual(statuses[candidate.arxiv_id].state, "migrated")
+            self.assertTrue((library / managed_filename(candidate)).is_file())
+            self.assertTrue(unrelated.is_file())
+            self.assertEqual(len(list((records / ".state" / "backups").glob("downloads.*.json"))), 1)
+            pdf_backups = list(
+                (records / ".state" / "backups").glob(
+                    "legacy-prefix-pdfs.*/*.pdf"
+                )
+            )
+            self.assertEqual(len(pdf_backups), 1)
+            self.assertEqual(pdf_backups[0].read_bytes(), b"%PDF-old")
 
     def test_newer_version_replaces_old_only_after_successful_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

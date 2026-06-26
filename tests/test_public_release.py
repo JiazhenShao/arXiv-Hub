@@ -86,6 +86,84 @@ class PublicLauncherTests(unittest.TestCase):
 
 
 class PublicRepositoryTests(unittest.TestCase):
+    def test_repository_contains_no_command_launchers(self) -> None:
+        command_files = sorted(
+            path.relative_to(ROOT)
+            for path in ROOT.rglob("*.command")
+            if ".git" not in path.parts
+        )
+
+        self.assertEqual(
+            command_files,
+            [
+                Path("Install arXiv Hub.command"),
+                Path("Uninstall arXiv Hub.command"),
+            ],
+        )
+
+    def test_pdf_reader_is_pinned_for_seed_library_scans(self) -> None:
+        requirements = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+
+        self.assertIn("pypdf==6.13.2\n", requirements)
+
+    def test_spotlight_launcher_uses_the_unified_supervisor(self) -> None:
+        launcher = (ROOT / "launcher" / "ArXiv Go.launcher.zsh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("scripts/launch_hub.py", launcher)
+        self.assertNotIn("scripts/launch_viewer.py", launcher)
+
+    def test_repository_does_not_contain_a_spotlight_command_duplicate(self) -> None:
+        self.assertFalse((ROOT / "launcher" / "ArXiv Go.command").exists())
+
+    def test_installer_and_uninstaller_manage_only_one_launcher(self) -> None:
+        installer = (ROOT / "Install arXiv Hub.command").read_text(
+            encoding="utf-8"
+        )
+        uninstaller = (ROOT / "Uninstall arXiv Hub.command").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("CONFIGURE_PATH=", installer)
+        self.assertNotIn(
+            'ditto "$SOURCE_DIR/launcher/Configure arXiv Hub.command"',
+            installer,
+        )
+        self.assertIn(
+            'ditto "$SOURCE_DIR/launcher/ArXiv Go.launcher.zsh" '
+            '"$LAUNCHER_PATH"',
+            installer,
+        )
+        self.assertIn('LAUNCHER_PATH="$LAUNCHER_DIR/ArXiv Go.command"', installer)
+        self.assertIn('rm -f "$LAUNCHER_DIR/arXiv Hub.command"', installer)
+        self.assertIn('/usr/bin/mdimport -i "$LAUNCHER_PATH"', installer)
+        self.assertIn(
+            'rm -f "$LAUNCHER_DIR/Configure arXiv Hub.command"',
+            installer,
+        )
+        self.assertNotIn("CONFIGURE=", uninstaller)
+        self.assertIn(
+            'rm -f "$HOME/Applications/Configure arXiv Hub.command"',
+            uninstaller,
+        )
+        self.assertIn(
+            'rm -f "$HOME/Applications/ArXiv Go.command"',
+            uninstaller,
+        )
+        self.assertIn(
+            'rm -f "$HOME/Applications/arXiv Hub.command"',
+            uninstaller,
+        )
+
+    def test_installer_defers_first_run_setup_to_unified_launcher(self) -> None:
+        installer = (ROOT / "Install arXiv Hub.command").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn('"$NEW_APP/scripts/setup_profile.py"', installer)
+        self.assertIn('if [[ -f "$PROFILE_PATH" ]]', installer)
+
     def test_installer_manages_private_python_without_homebrew(self) -> None:
         installer = (ROOT / "Install arXiv Hub.command").read_text(
             encoding="utf-8"

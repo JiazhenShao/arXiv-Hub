@@ -54,6 +54,46 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(items[0].weight, 3.0)
         self.assertEqual(items[0].observed_date, date(2025, 1, 2))
 
+    def test_library_scan_exposes_manual_filename_marker_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "2606.00001v1.pdf"
+            original.write_bytes(b"%PDF-test")
+            first = scan_library([root], limit=10)[0]
+            renamed = root / "[!!!] 2606.00001v1.pdf"
+            original.rename(renamed)
+            second = scan_library([root], limit=10)[0]
+
+        self.assertFalse(first.explicit)
+        self.assertEqual(first.fingerprint, "unmarked")
+        self.assertTrue(second.explicit)
+        self.assertEqual(second.fingerprint, "!!!")
+
+    def test_report_scan_exposes_direct_markdown_rating_changes(self) -> None:
+        report_fixture = (
+            '<!-- arxiv-record:{"arxiv_id":"2606.00001",'
+            '"versioned_id":"2606.00001v1","title":"One","abstract":"A",'
+            '"authors":["A"],"categories":["nucl-th"],'
+            '"primary_category":"nucl-th",'
+            '"published":"2026-06-08T00:00:00+00:00",'
+            '"updated":"2026-06-08T00:00:00+00:00",'
+            '"abs_url":"https://arxiv.org/abs/2606.00001v1",'
+            '"pdf_url":"https://arxiv.org/pdf/2606.00001v1"} -->\n'
+            '**Interest:** high\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "2026-06-08.md"
+            path.write_text(report_fixture, encoding="utf-8")
+            first = parse_report_history(Path(tmp), limit=100)[0]
+            path.write_text(
+                report_fixture.replace("Interest:** high", "Interest:** skip"),
+                encoding="utf-8",
+            )
+            second = parse_report_history(Path(tmp), limit=100)[0]
+
+        self.assertEqual(first.fingerprint, "2026-06-08.md:high")
+        self.assertEqual(second.fingerprint, "2026-06-08.md:skip")
+
     def test_report_ratings_override_unrated_exposure_weight(self) -> None:
         report = """# Daily arXiv Recommendations
 
