@@ -8,7 +8,7 @@ UV_DIR="$APP_SUPPORT/bin"
 UV_PYTHON_INSTALL_DIR="$APP_SUPPORT/python"
 PROFILE_PATH="$APP_SUPPORT/profile.toml"
 LAUNCHER_DIR="$HOME/Applications"
-LAUNCHER_PATH="$LAUNCHER_DIR/arXiv Hub.command"
+LAUNCHER_PATH="$LAUNCHER_DIR/ArXiv Go.command"
 SOURCE_DIR="${0:A:h}"
 UV_VERSION="0.11.21"
 
@@ -91,12 +91,25 @@ mv "$NEW_APP" "$APP_DIR"
 mv "$NEW_VENV" "$VENV_DIR"
 SWITCH_COMPLETE=1
 
-ditto "$SOURCE_DIR/launcher/arXiv Hub.launcher.zsh" "$LAUNCHER_PATH"
+if [[ -f "$PROFILE_PATH" ]]; then
+  print "Migrating confirmed legacy download names..."
+  "$VENV_DIR/bin/python" "$APP_DIR/scripts/migrate_download_prefixes.py" \
+    --profile "$PROFILE_PATH"
+fi
+
+ditto "$SOURCE_DIR/launcher/ArXiv Go.launcher.zsh" "$LAUNCHER_PATH"
 chmod 755 "$LAUNCHER_PATH"
+if [[ ! -x "$LAUNCHER_PATH" ]] || \
+   ! grep -q "scripts/launch_hub.py" "$LAUNCHER_PATH"; then
+  print -u2 "The Spotlight launcher could not be verified."
+  exit 2
+fi
+rm -f "$LAUNCHER_DIR/arXiv Hub.command"
 rm -f "$LAUNCHER_DIR/Configure arXiv Hub.command"
+/usr/bin/mdimport -i "$LAUNCHER_PATH" >/dev/null 2>&1 || true
 
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
 print ""
 print "arXiv Hub is ready."
-print "Open Spotlight and type: arXiv Hub"
+print "Open Spotlight and type: ArXiv Go"
 read -k 1 "?Press any key to close."

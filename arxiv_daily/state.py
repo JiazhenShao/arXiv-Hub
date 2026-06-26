@@ -12,6 +12,7 @@ from .models import Paper
 class RecommenderState:
     seen_ids: set[str] = field(default_factory=set)
     last_announcement_date: date | None = None
+    last_digest_date: date | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RecommenderState":
@@ -20,9 +21,13 @@ class RecommenderState:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             last = data.get("last_announcement_date")
+            last_digest = data.get("last_digest_date")
             return cls(
                 seen_ids={str(value) for value in data.get("seen_ids", [])},
                 last_announcement_date=date.fromisoformat(last) if last else None,
+                last_digest_date=(
+                    date.fromisoformat(last_digest) if last_digest else None
+                ),
             )
         except (OSError, ValueError, TypeError):
             return cls()
@@ -37,6 +42,11 @@ class RecommenderState:
                     "last_announcement_date": (
                         self.last_announcement_date.isoformat()
                         if self.last_announcement_date
+                        else None
+                    ),
+                    "last_digest_date": (
+                        self.last_digest_date.isoformat()
+                        if self.last_digest_date
                         else None
                     ),
                 },

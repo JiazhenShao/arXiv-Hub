@@ -9,13 +9,18 @@ from typing import Protocol
 
 from .config import ProfileConfig, Topic
 from .embedding import EmbeddingCache
-from .history import parse_report_history, report_arxiv_ids, scan_library
+from .history import annotation_marker, parse_report_history, report_arxiv_ids, scan_library
 from .models import InterestPaper, Paper
+from .preferences import PreferenceEvidence, PreferenceSignalStore
 from .ranking import build_interest_clusters, rank_candidates, select_diverse
 from .report import ExistingReportError, render_report, write_report_atomic
+from .schedule import digest_cycle_for_date
 from .seed_library import SeedScanError, scan_seed_library
 from .state import MetadataCache, RecommenderState
 from .viewer import write_html_companion
+
+
+MAX_ADAPTIVE_BACKFILL_DAYS = 30
 
 
 class PaperSource(Protocol):
@@ -97,7 +102,11 @@ class DailyPipeline:
         self,
         run_date: date,
         metadata_cache: MetadataCache,
+        preference_store: PreferenceSignalStore | None = None,
     ) -> list[InterestPaper]:
+        signal_store = preference_store or PreferenceSignalStore(
+            self.config.record_dir / ".state" / "preference-signals.json"
+        )
         report_items = parse_report_history(
             self.config.record_dir,
             self.config.history_report_limit,
@@ -140,28 +149,94 @@ class DailyPipeline:
                 paper=metadata_cache.papers[item.arxiv_id],
                 weight=item.weight,
                 observed_date=item.observed_date,
+                source="library",
+                explicit=getattr(item, "explicit", item.weight != 1.0),
+                fingerprint=(
+                    getattr(item, "fingerprint", "")
+                    or annotation_marker(Path(item.path).name)
+                    or "unmarked"
+                ),
+                changed_at=(
+                    getattr(item, "changed_at", None)
+                    or datetime.fromtimestamp(
+                        Path(item.path).stat().st_ctime,
+                        tz=timezone.utc,
+                    )
+                ),
             )
             for item in library_items
             if item.arxiv_id in metadata_cache.papers
         ]
 
+        reports_by_id: dict[str, InterestPaper] = {}
+        libraries_by_id: dict[str, InterestPaper] = {}
+        for item in report_items:
+            reports_by_id.setdefault(item.paper.arxiv_id, item)
+        for item in library_history:
+            libraries_by_id.setdefault(item.paper.arxiv_id, item)
+
         combined: dict[str, InterestPaper] = {}
-        for item in report_items + library_history:
-            age = (
-                max(0, (run_date - item.observed_date).days)
-                if item.observed_date
-                else 0
+        for arxiv_id in reports_by_id.keys() | libraries_by_id.keys():
+            report_item = reports_by_id.get(arxiv_id)
+            library_item = libraries_by_id.get(arxiv_id)
+            report_evidence = (
+                PreferenceEvidence(
+                    source="report",
+                    weight=report_item.weight,
+                    explicit=True,
+                    fingerprint=report_item.fingerprint,
+                    fallback_changed_at=(
+                        report_item.changed_at
+                        or datetime.combine(
+                            report_item.observed_date or run_date,
+                            datetime.min.time(),
+                            tzinfo=timezone.utc,
+                        )
+                    ),
+                )
+                if report_item
+                else None
             )
-            decayed = item.weight * math.exp(
+            library_evidence = (
+                PreferenceEvidence(
+                    source="library",
+                    weight=library_item.weight,
+                    explicit=library_item.explicit,
+                    fingerprint=library_item.fingerprint,
+                    fallback_changed_at=(
+                        library_item.changed_at
+                        or datetime.combine(
+                            library_item.observed_date or run_date,
+                            datetime.min.time(),
+                            tzinfo=timezone.utc,
+                        )
+                    ),
+                )
+                if library_item
+                else None
+            )
+            resolved = signal_store.resolve(
+                arxiv_id,
+                report=report_evidence,
+                library=library_evidence,
+            )
+            source_item = report_item if resolved.source == "report" else library_item
+            assert source_item is not None
+            age = (
+                max(0, (run_date - resolved.changed_at.date()).days)
+            )
+            decayed = resolved.weight * math.exp(
                 -age / self.config.recency_decay_days
             )
-            current = combined.get(item.paper.arxiv_id)
-            if current is None or abs(decayed) > abs(current.weight):
-                combined[item.paper.arxiv_id] = InterestPaper(
-                    paper=item.paper,
-                    weight=decayed,
-                    observed_date=item.observed_date,
-                )
+            combined[arxiv_id] = InterestPaper(
+                paper=source_item.paper,
+                weight=decayed,
+                observed_date=resolved.changed_at.date(),
+                source=resolved.source,
+                explicit=source_item.explicit,
+                fingerprint=source_item.fingerprint,
+                changed_at=resolved.changed_at,
+            )
         return list(combined.values())
 
     def _embed_with_cache(
@@ -188,6 +263,30 @@ class DailyPipeline:
                 cache.put(paper, vector)
         return vectors
 
+    def _query_start(self, run_date: date, query_end: date) -> date:
+        prior_report_dates = []
+        for path in self.config.record_dir.glob("????-??-??.md"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                report_date = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if report_date < run_date:
+                prior_report_dates.append(report_date)
+        missed_weekdays = 0
+        if prior_report_dates:
+            candidate = max(prior_report_dates) + timedelta(days=1)
+            while candidate < run_date:
+                if candidate.weekday() < 5:
+                    missed_weekdays += 1
+                candidate += timedelta(days=1)
+        backfill_days = min(
+            MAX_ADAPTIVE_BACKFILL_DAYS,
+            self.config.backfill_days + missed_weekdays,
+        )
+        return query_end - timedelta(days=backfill_days)
+
     def run(
         self,
         run_date: date,
@@ -197,6 +296,7 @@ class DailyPipeline:
     ) -> RunResult:
         if run_date.weekday() >= 5:
             return RunResult(status="skipped-weekend")
+        cycle = digest_cycle_for_date(run_date)
 
         report_path = self.config.record_dir / f"{run_date.isoformat()}.md"
         if report_path.exists() and not force:
@@ -215,21 +315,24 @@ class DailyPipeline:
             state_dir / "embeddings.json",
             self.embedder.label,
         )
-        query_start = run_date - timedelta(days=self.config.backfill_days)
+        preference_store = PreferenceSignalStore(
+            state_dir / "preference-signals.json"
+        )
+        query_start = self._query_start(run_date, cycle.submission_end)
         try:
-            fetched = self.source.fetch_candidates(query_start, run_date)
+            fetched = self.source.fetch_candidates(query_start, cycle.submission_end)
         except Exception as exc:
             raise PipelineError(f"Verified arXiv retrieval failed: {exc}") from exc
         if not fetched:
             return RunResult(status="skipped-no-announcement")
-        latest_announcement = max(paper.published.date() for paper in fetched)
-        announcement_age = (run_date - latest_announcement).days
+        latest_submission = max(paper.published.date() for paper in fetched)
+        submission_age = (cycle.submission_end - latest_submission).days
         if (
-            announcement_age < 0
-            or announcement_age > self.config.announcement_max_age_days
+            submission_age < 0
+            or submission_age > self.config.announcement_max_age_days
             or (
-                state.last_announcement_date is not None
-                and latest_announcement <= state.last_announcement_date
+                state.last_digest_date is not None
+                and run_date <= state.last_digest_date
                 and not force
             )
         ):
@@ -241,7 +344,11 @@ class DailyPipeline:
         if not unseen:
             return RunResult(status="skipped-no-unseen")
         try:
-            interests = self._load_interests(run_date, metadata_cache)
+            interests = self._load_interests(
+                run_date,
+                metadata_cache,
+                preference_store,
+            )
             all_for_embedding = [
                 item.paper for item in interests
             ] + unseen
@@ -291,10 +398,12 @@ class DailyPipeline:
             return RunResult(status="skipped-no-relevant")
         fetched_at = datetime.now(timezone.utc)
         report_text = render_report(
-            run_date=run_date,
-            announcement_date=latest_announcement,
+            digest_date=run_date,
+            announcement_at=cycle.announcement_at,
             query_start=query_start,
+            query_end=cycle.submission_end,
             fetched_at=fetched_at,
+            timezone_name=self.config.viewer_timezone,
             candidate_count=len(unseen),
             model_label=self.embedder.label,
             selected=selected,
@@ -309,11 +418,13 @@ class DailyPipeline:
         state_path = state_dir / "state.json"
         metadata_path = state_dir / "metadata.json"
         embedding_path = state_dir / "embeddings.json"
+        preference_path = state_dir / "preference-signals.json"
         html_path = report_path.with_suffix(".html")
         transaction_paths = [
             state_path,
             metadata_path,
             embedding_path,
+            preference_path,
             report_path,
             html_path,
         ]
@@ -322,11 +433,12 @@ class DailyPipeline:
             for path in transaction_paths
         }
         state.seen_ids.update(item.paper.arxiv_id for item in selected)
-        state.last_announcement_date = latest_announcement
+        state.last_digest_date = run_date
         try:
             state.save(state_path)
             metadata_cache.save()
             embedding_cache.save()
+            preference_store.save()
             write_report_atomic(report_path, report_text, force=force)
             write_html_companion(
                 report_path,

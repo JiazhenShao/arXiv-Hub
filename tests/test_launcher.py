@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, time
 from pathlib import Path
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 from scripts.launch_viewer import (
     make_downloader,
@@ -13,10 +14,33 @@ from scripts.launch_viewer import (
     select_report_date,
     viewer_url,
 )
+from scripts.run_daily import resolve_digest_date
 from arxiv_daily.viewer import SearchResult
 
 
 class LauncherTests(unittest.TestCase):
+    def test_manual_daily_command_uses_the_same_reading_cycle_as_viewer(self) -> None:
+        timezone = ZoneInfo("America/Chicago")
+
+        self.assertEqual(
+            resolve_digest_date(
+                None,
+                timezone_name="America/Chicago",
+                search_start_time=time(20, 0),
+                now=datetime(2026, 6, 14, 21, 0, tzinfo=timezone),
+            ),
+            date(2026, 6, 15),
+        )
+        self.assertEqual(
+            resolve_digest_date(
+                None,
+                timezone_name="America/Chicago",
+                search_start_time=time(20, 0),
+                now=datetime(2026, 6, 15, 21, 0, tzinfo=timezone),
+            ),
+            date(2026, 6, 16),
+        )
+
     def test_downloader_uses_configured_library_and_shared_arxiv_state(self) -> None:
         config = Mock(
             record_dir=Path("/tmp/records"),
@@ -77,7 +101,10 @@ class LauncherTests(unittest.TestCase):
                 runner=runner,
             )
 
-        self.assertEqual(status, SearchResult("already-exists", "Today's report is ready."))
+        self.assertEqual(
+            status,
+            SearchResult("already-exists", "Report for 2026-06-09 is ready."),
+        )
         runner.assert_not_called()
 
     def test_missing_today_report_runs_pinned_daily_command(self) -> None:
@@ -93,7 +120,13 @@ class LauncherTests(unittest.TestCase):
                 runner=runner,
             )
 
-        self.assertEqual(status, SearchResult("skipped", "No new digest was created."))
+        self.assertEqual(
+            status,
+            SearchResult(
+                "skipped",
+                "No new digest was created for 2026-06-09.",
+            ),
+        )
         runner.assert_called_once()
         command = runner.call_args.args[0]
         self.assertEqual(command[0], "/tmp/python")
@@ -154,7 +187,13 @@ class LauncherTests(unittest.TestCase):
         runner.assert_not_called()
         status = daily_runner(date(2026, 6, 9))
 
-        self.assertEqual(status, SearchResult("skipped", "No new digest was created."))
+        self.assertEqual(
+            status,
+            SearchResult(
+                "skipped",
+                "No new digest was created for 2026-06-09.",
+            ),
+        )
         runner.assert_called_once()
 
 

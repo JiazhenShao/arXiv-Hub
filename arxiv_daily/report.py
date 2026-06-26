@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .history import parse_report_ratings
 from .models import RankedPaper
@@ -28,22 +29,62 @@ def _quote_abstract(abstract: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in abstract.splitlines())
 
 
+def _full_date(value: date) -> str:
+    return value.strftime("%A, %B %-d, %Y")
+
+
+def _clock(value: datetime) -> str:
+    return value.strftime("%-I:%M %p %Z")
+
+
 def render_report(
     *,
-    run_date: date,
-    announcement_date: date,
+    digest_date: date,
+    announcement_at: datetime,
     query_start: date,
+    query_end: date,
     fetched_at: datetime,
+    timezone_name: str,
     candidate_count: int,
     model_label: str,
     selected: list[RankedPaper],
 ) -> str:
+    local_timezone = ZoneInfo(timezone_name)
+    eastern_announcement = announcement_at.astimezone(
+        ZoneInfo("America/New_York")
+    )
+    local_announcement = announcement_at.astimezone(local_timezone)
+    local_suffix = ""
+    if local_announcement.utcoffset() != eastern_announcement.utcoffset():
+        local_suffix = f" ({_clock(local_announcement)})"
+    searched_at = fetched_at.astimezone(local_timezone)
+    digest_metadata = json.dumps(
+        {
+            "schema_version": 1,
+            "digest_date": digest_date.isoformat(),
+            "announcement_at": announcement_at.isoformat(),
+            "submission_start": query_start.isoformat(),
+            "submission_end": query_end.isoformat(),
+            "searched_at": fetched_at.astimezone(timezone.utc).isoformat(),
+            "viewer_timezone": timezone_name,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
     lines = [
-        f"# Daily arXiv Recommendations — {run_date.isoformat()}",
+        f"# Daily arXiv Recommendations — {_full_date(digest_date)}",
         "",
-        f"- **Announcement batch:** {announcement_date.isoformat()}",
-        f"- **Query window:** {query_start.isoformat()} to {run_date.isoformat()}",
-        f"- **Fetched from arXiv:** {fetched_at.astimezone(timezone.utc).isoformat()}",
+        f"<!-- arxiv-digest:{digest_metadata} -->",
+        f"- **Digest for:** {_full_date(digest_date)}",
+        (
+            f"- **arXiv announcement:** {_full_date(eastern_announcement.date())} "
+            f"at {_clock(eastern_announcement)}{local_suffix}"
+        ),
+        (
+            f"- **Submissions searched:** {query_start.isoformat()} "
+            f"to {query_end.isoformat()}"
+        ),
+        f"- **Search performed:** {_full_date(searched_at.date())} at {_clock(searched_at)}",
         f"- **Verified unseen candidates:** {candidate_count}",
         f"- **Embedding model:** `{model_label}`",
         f"- **Selected papers:** {len(selected)}",

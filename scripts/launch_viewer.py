@@ -57,7 +57,10 @@ def run_daily_if_missing(
 ) -> SearchResult:
     report_path = record_dir / f"{run_date.isoformat()}.md"
     if report_path.is_file() and not report_path.is_symlink():
-        return SearchResult("already-exists", "Today's report is ready.")
+        return SearchResult(
+            "already-exists",
+            f"Report for {run_date.isoformat()} is ready.",
+        )
     result = runner(
         [
             str(python_path),
@@ -82,8 +85,14 @@ def run_daily_if_missing(
     if result.returncode != 0:
         return SearchResult("failed", _failure_message(result.stderr))
     if report_path.is_file():
-        return SearchResult("written", "Today's report is ready.")
-    return SearchResult("skipped", "No new digest was created.")
+        return SearchResult(
+            "written",
+            f"Report for {run_date.isoformat()} is ready.",
+        )
+    return SearchResult(
+        "skipped",
+        f"No new digest was created for {run_date.isoformat()}.",
+    )
 
 
 def _failure_message(stderr: str) -> str:
@@ -259,8 +268,9 @@ def main() -> int:
     print(f"Refreshed {len(generated)} offline HTML report(s).")
     available_at = config.search_start_time.strftime("%-I:%M %p")
     print(
-        f"Use Start searching after {available_at} "
-        f"{config.viewer_timezone}."
+        f"New weekday search cycles open at {available_at} "
+        f"{config.viewer_timezone}; missed cycles remain available "
+        "during the following daytime."
     )
     print("Use Close Server in the browser or press Ctrl+C here to stop.")
     if not args.no_open:

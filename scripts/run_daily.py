@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,25 @@ from arxiv_daily.arxiv_api import ArxivClient  # noqa: E402
 from arxiv_daily.config import ProfileConfig  # noqa: E402
 from arxiv_daily.embedding import Specter2Embedder  # noqa: E402
 from arxiv_daily.pipeline import DailyPipeline, PipelineError  # noqa: E402
+from arxiv_daily.schedule import eligible_digest_cycle  # noqa: E402
+
+
+def resolve_digest_date(
+    requested: date | None,
+    *,
+    timezone_name: str,
+    search_start_time: time,
+    now: datetime | None = None,
+) -> date:
+    if requested is not None:
+        return requested
+    viewer_timezone = ZoneInfo(timezone_name)
+    current = now or datetime.now(viewer_timezone)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=viewer_timezone)
+    else:
+        current = current.astimezone(viewer_timezone)
+    return eligible_digest_cycle(current, search_start_time).digest_date
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,8 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--date",
         type=date.fromisoformat,
-        default=date.today(),
-        help="Local run date in YYYY-MM-DD form (default: today).",
+        default=None,
+        help=(
+            "Weekday reading date in YYYY-MM-DD form "
+            "(default: current eligible digest cycle)."
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -56,6 +79,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     config = ProfileConfig.load(args.profile)
+    digest_date = resolve_digest_date(
+        args.date,
+        timezone_name=config.viewer_timezone,
+        search_start_time=config.search_start_time,
+    )
     source = ArxivClient(
         config.categories,
         user_agent=config.user_agent,
@@ -74,7 +102,7 @@ def main() -> int:
     )
     pipeline = DailyPipeline(config=config, source=source, embedder=embedder)
     try:
-        result = pipeline.run(args.date, dry_run=args.dry_run, force=args.force)
+        result = pipeline.run(digest_date, dry_run=args.dry_run, force=args.force)
     except PipelineError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2

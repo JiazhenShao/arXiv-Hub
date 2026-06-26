@@ -5,9 +5,9 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,11 +16,14 @@ from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo
 
 from .downloader import DownloadStatus, PaperDownloader
-from .history import RECORD_RE, RATING_RE
+from .history import RATING_WEIGHTS, RECORD_RE, RATING_RE
+from .preferences import PreferenceEvidence, PreferenceSignalStore
 from .report import format_authors
+from .schedule import eligible_digest_cycle, next_digest_start
 
 
 REPORT_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DIGEST_CONTEXT_RE = re.compile(r"<!-- arxiv-digest:(\{.*?\}) -->")
 EDITABLE_RATINGS = ("high", "medium", "low", "skip", "unrated")
 LEGACY_RATINGS = {"strong": "high", "maybe": "medium"}
 MAX_REQUEST_BYTES = 4096
@@ -48,6 +51,95 @@ class ViewerPaper:
 class SearchResult:
     status: str
     message: str
+
+
+@dataclass(frozen=True)
+class ReportPagination:
+    dates: tuple[str, ...]
+    page: int
+    total_pages: int
+    tokens: tuple[int | None, ...]
+
+
+def paginate_report_dates(
+    dates: Sequence[str],
+    requested_page: str | int | None,
+    page_size: int = 7,
+) -> ReportPagination:
+    if page_size <= 0:
+        raise ValueError("Page size must be positive")
+    try:
+        parsed_page = int(requested_page) if requested_page is not None else 1
+    except (TypeError, ValueError):
+        parsed_page = 1
+    total_pages = max(1, (len(dates) + page_size - 1) // page_size)
+    page = min(max(parsed_page, 1), total_pages)
+    start = (page - 1) * page_size
+    visible = tuple(dates[start : start + page_size])
+    if total_pages <= 7:
+        tokens: tuple[int | None, ...] = tuple(range(1, total_pages + 1))
+    elif page <= 4:
+        tokens = (1, 2, 3, 4, 5, None, total_pages - 1, total_pages)
+    elif page >= total_pages - 3:
+        tokens = (
+            1,
+            2,
+            None,
+            total_pages - 4,
+            total_pages - 3,
+            total_pages - 2,
+            total_pages - 1,
+            total_pages,
+        )
+    else:
+        tokens = (1, None, page - 1, page, page + 1, None, total_pages)
+    return ReportPagination(visible, page, total_pages, tokens)
+
+
+@dataclass(frozen=True)
+class ViewerReportContext:
+    digest_date: date
+    announcement_at: datetime
+    submission_start: date
+    submission_end: date
+    searched_at: datetime
+    viewer_timezone: str
+
+
+def _full_date(value: date) -> str:
+    return value.strftime("%A, %B %-d, %Y")
+
+
+def _short_date(value: date) -> str:
+    return value.strftime("%A, %B %-d")
+
+
+def parse_report_context(
+    report_text: str,
+    report_date: str,
+) -> ViewerReportContext | None:
+    match = DIGEST_CONTEXT_RE.search(report_text)
+    if match is None:
+        return None
+    try:
+        metadata = json.loads(match.group(1))
+        context = ViewerReportContext(
+            digest_date=date.fromisoformat(str(metadata["digest_date"])),
+            announcement_at=datetime.fromisoformat(
+                str(metadata["announcement_at"])
+            ),
+            submission_start=date.fromisoformat(
+                str(metadata["submission_start"])
+            ),
+            submission_end=date.fromisoformat(str(metadata["submission_end"])),
+            searched_at=datetime.fromisoformat(str(metadata["searched_at"])),
+            viewer_timezone=str(metadata["viewer_timezone"]),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Report contains invalid digest metadata") from exc
+    if context.digest_date.isoformat() != report_date:
+        raise ValueError("Report digest date does not match its filename")
+    return context
 
 
 def _canonical_rating(value: str) -> str:
@@ -129,6 +221,42 @@ def generate_html_companion(
     if not REPORT_DATE_RE.fullmatch(report_date):
         raise ValueError("Invalid report date")
     papers = parse_viewer_papers(report_text)
+    context = parse_report_context(report_text, report_date)
+    display_date = _full_date(date.fromisoformat(report_date))
+    if context is None:
+        report_context = (
+            '<aside class="legacy-notice"><strong>Legacy date note</strong>'
+            "<span>This report predates the reading-date system. Its filename "
+            "represented the newest submission date used by the old search, "
+            "not an arXiv announcement date.</span></aside>"
+        )
+    else:
+        eastern = context.announcement_at.astimezone(
+            ZoneInfo("America/New_York")
+        )
+        local = context.announcement_at.astimezone(
+            ZoneInfo(context.viewer_timezone)
+        )
+        announcement_time = eastern.strftime("%-I:%M %p %Z")
+        if local.utcoffset() != eastern.utcoffset():
+            announcement_time += f" ({local.strftime('%-I:%M %p %Z')})"
+        searched = context.searched_at.astimezone(
+            ZoneInfo(context.viewer_timezone)
+        )
+        report_context = (
+            '<dl class="report-context">'
+            f"<div><dt>Digest for</dt><dd>{_escape(display_date)}</dd></div>"
+            "<div><dt>arXiv announcement</dt>"
+            f"<dd>{_escape(_full_date(eastern.date()))} at "
+            f"{_escape(announcement_time)}</dd></div>"
+            "<div><dt>Submissions searched</dt>"
+            f"<dd>{context.submission_start.isoformat()} to "
+            f"{context.submission_end.isoformat()}</dd></div>"
+            "<div><dt>Search performed</dt>"
+            f"<dd>{_escape(_full_date(searched.date()))} at "
+            f"{_escape(searched.strftime('%-I:%M %p %Z'))}</dd></div>"
+            "</dl>"
+        )
     config = json.dumps(
         {"interactive": interactive, "token": token, "date": report_date},
         ensure_ascii=True,
@@ -143,7 +271,7 @@ def generate_html_companion(
         ""
         if interactive
         else '<p class="offline-notice">'
-        "Open with arXiv Hub.command to change ratings.</p>"
+        "Open with ArXiv Go.command to change ratings.</p>"
     )
     close_button = (
         f'<a class="all-reports" href="/?token={quote(token)}">All reports</a>'
@@ -266,6 +394,25 @@ def generate_html_companion(
       padding: 12px 16px; border: 1px solid var(--line);
       background: rgba(255,255,255,.55); margin: 0 0 28px;
     }}
+    .legacy-notice {{
+      display: grid; gap: 4px; margin: 0 0 22px; padding: 14px 16px;
+      border: 1px solid #d8bd77; border-radius: 12px; background: #fff4d8;
+      color: #665528;
+    }}
+    .legacy-notice strong {{ color: var(--ink); }}
+    .report-context {{
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px; margin: 0 0 24px;
+    }}
+    .report-context div {{
+      padding: 13px 15px; border: 1px solid var(--line);
+      border-radius: 12px; background: rgba(255, 255, 255, .66);
+    }}
+    .report-context dt {{
+      color: var(--muted); font: 700 .68rem/1.2 ui-monospace, SFMono-Regular,
+      monospace; text-transform: uppercase; letter-spacing: .05em;
+    }}
+    .report-context dd {{ margin: 6px 0 0; font-weight: 700; }}
     .close-server {{
       border: 1px solid #8e3224; background: #fff6f2; color: #8e3224;
       padding: 9px 14px; border-radius: 999px; cursor: pointer; font-weight: 700;
@@ -319,6 +466,7 @@ def generate_html_companion(
       .shell {{ padding: 28px 14px 70px; }}
       header, .paper-heading {{ flex-direction: column; }}
       .toolbar {{ align-items: flex-start; }}
+      .report-context {{ grid-template-columns: 1fr; }}
       .paper {{ grid-template-columns: 1fr; padding: 17px; }}
       .paper-number {{ display: none; }}
     }}
@@ -330,11 +478,12 @@ def generate_html_companion(
       <div>
         <div class="eyebrow">Verified paper digest</div>
         <h1>Daily arXiv<br>Recommendations</h1>
-        <p>{_escape(report_date)} · {len(papers)} papers</p>
+        <p>{_escape(display_date)} · {len(papers)} papers</p>
       </div>
       <div class="toolbar">{status}{close_button}</div>
     </header>
     {notice}
+    {report_context}
     {"".join(cards)}
   </main>
   <script src="{asset}/katex.min.js"></script>
@@ -383,6 +532,7 @@ def generate_html_companion(
           const status = await response.json();
           searchBusy = Boolean(status.busy);
           refreshCloseState();
+          searchButton.textContent = status.button_label || "Start searching";
           searchButton.disabled = !status.enabled;
           searchStatus.textContent = status.message;
           if (searchStartedHere && status.state === "ready") {{
@@ -572,6 +722,23 @@ def update_report_rating(
         )
         updated = text[: match.end()] + section + text[end:]
         write_text_atomic(path, updated)
+        changed_at = datetime.now(timezone.utc)
+        signal_store = PreferenceSignalStore(
+            record_dir / ".state" / "preference-signals.json",
+            now=lambda: changed_at,
+        )
+        signal_store.resolve(
+            arxiv_id,
+            report=PreferenceEvidence(
+                source="report",
+                weight=RATING_WEIGHTS[rating],
+                explicit=True,
+                fingerprint=f"{path.name}:{rating}",
+                fallback_changed_at=changed_at,
+            ),
+            library=None,
+        )
+        signal_store.save()
 
 
 def generate_all_html(record_dir: Path) -> list[Path]:
@@ -615,11 +782,6 @@ def create_server(
     assets_dir = assets_dir.resolve()
     viewer_timezone = ZoneInfo(timezone_name)
     now_provider = now_provider or (lambda: datetime.now(viewer_timezone))
-    available_at = search_start_time.strftime("%-I:%M %p")
-    availability_message = f"Available after {available_at} {timezone_name}."
-    search_availability_message = (
-        f"Search is available after {available_at} {timezone_name}."
-    )
     state_lock = Lock()
     download_io_lock = Lock()
     active_job = {"kind": "", "date": ""}
@@ -706,37 +868,47 @@ def create_server(
 
     def search_status() -> dict[str, object]:
         now = current_viewer_time()
-        today = now.date().isoformat()
+        cycle = eligible_digest_cycle(now, search_start_time)
+        cycle_text = cycle.digest_date.isoformat()
+        digest_label = _short_date(cycle.digest_date)
+        button_label = f"Search for {digest_label} digest"
         with state_lock:
-            if search_state["date"] != today and search_state["state"] != "running":
+            if (
+                search_state["date"] != cycle_text
+                and search_state["state"] != "running"
+            ):
                 search_state.update(
-                    date=today,
+                    date=cycle_text,
                     state="idle",
-                    message="Ready to search.",
+                    message=(
+                        f"{digest_label} digest is ready. It corresponds to "
+                        f"the {_full_date(cycle.announcement_at.date())} "
+                        "arXiv announcement."
+                    ),
                 )
-            report_path = record_dir / f"{today}.md"
+            report_path = record_dir / f"{cycle_text}.md"
             if report_path.is_file() and not report_path.is_symlink():
+                next_start = next_digest_start(now, search_start_time)
                 return {
-                    "date": today,
+                    "date": cycle_text,
                     "state": "ready",
                     "enabled": False,
-                    "message": "Today's report is ready.",
-                    "busy": bool(active_job["kind"]),
-                }
-            if now.timetz().replace(tzinfo=None) < search_start_time:
-                return {
-                    "date": today,
-                    "state": "too-early",
-                    "enabled": False,
-                    "message": availability_message,
+                    "message": (
+                        f"{cycle.digest_date.strftime('%A')}'s digest is "
+                        "complete. Next digest becomes available "
+                        f"{next_start.strftime('%A at %-I:%M %p')} "
+                        f"{timezone_name}."
+                    ),
+                    "button_label": button_label,
                     "busy": bool(active_job["kind"]),
                 }
             state = search_state["state"]
             return {
-                "date": today,
+                "date": cycle_text,
                 "state": state,
                 "enabled": state != "running" and not active_job["kind"],
                 "message": search_state["message"],
+                "button_label": button_label,
                 "busy": bool(active_job["kind"]),
             }
 
@@ -769,19 +941,15 @@ def create_server(
 
     def start_search() -> tuple[HTTPStatus, dict[str, object]]:
         now = current_viewer_time()
-        today = now.date()
-        today_text = today.isoformat()
+        cycle = eligible_digest_cycle(now, search_start_time)
+        cycle_text = cycle.digest_date.isoformat()
+        digest_label = _short_date(cycle.digest_date)
         with state_lock:
-            report_path = record_dir / f"{today_text}.md"
-            if now.timetz().replace(tzinfo=None) < search_start_time:
-                return HTTPStatus.FORBIDDEN, {
-                    "ok": False,
-                    "message": search_availability_message,
-                }
+            report_path = record_dir / f"{cycle_text}.md"
             if report_path.is_file() and not report_path.is_symlink():
                 return HTTPStatus.CONFLICT, {
                     "ok": False,
-                    "message": "Today's report already exists.",
+                    "message": f"Report for {cycle_text} already exists.",
                 }
             if search_state["state"] == "running":
                 return HTTPStatus.CONFLICT, {
@@ -793,16 +961,19 @@ def create_server(
                     "ok": False,
                     "message": f"A {active_job['kind']} job is already running.",
                 }
-            active_job.update(kind="search", date=today_text)
+            active_job.update(kind="search", date=cycle_text)
             search_state.update(
-                date=today_text,
+                date=cycle_text,
                 state="running",
-                message="Searching verified arXiv metadata...",
+                message=(
+                    f"Searching verified arXiv metadata for the "
+                    f"{digest_label} digest..."
+                ),
             )
 
         def worker() -> None:
             try:
-                result = server.search_runner(today)
+                result = server.search_runner(cycle.digest_date)
             except Exception as exc:
                 print(f"[viewer] daily search failed: {exc}")
                 result = SearchResult(
@@ -823,7 +994,7 @@ def create_server(
             )
             with state_lock:
                 search_state.update(
-                    date=today_text,
+                    date=cycle_text,
                     state=state,
                     message=message,
                 )
@@ -1052,14 +1223,49 @@ def create_server(
                 return
             if parsed.path == "/":
                 dates = list_report_dates(record_dir)
+                requested_page = parse_qs(parsed.query).get("page", ["1"])[0]
+                pagination = paginate_report_dates(dates, requested_page)
                 links = "".join(
                     '<li><a class="report-link" '
-                    f'href="/report/{date}?token={quote(token)}">'
-                    f"<span>{date}</span><strong>Open report →</strong></a></li>"
-                    for date in dates
+                    f'href="/report/{report_date}?token={quote(token)}">'
+                    f"<span>{_escape(_full_date(date.fromisoformat(report_date)))}</span>"
+                    "<strong>Open report →</strong></a></li>"
+                    for report_date in pagination.dates
                 )
+                pagination_html = ""
+                if pagination.total_pages > 1:
+                    def page_link(page: int, label: str, css_class: str = "") -> str:
+                        class_attr = f' class="{css_class}"' if css_class else ""
+                        return (
+                            f'<a{class_attr} href="/?page={page}&amp;token={quote(token)}">'
+                            f"{label}</a>"
+                        )
+
+                    nav_items: list[str] = []
+                    if pagination.page == 1:
+                        nav_items.append('<span class="disabled">Newer</span>')
+                    else:
+                        nav_items.append(page_link(pagination.page - 1, "Newer"))
+                    for page_token in pagination.tokens:
+                        if page_token is None:
+                            nav_items.append('<span class="ellipsis">...</span>')
+                        elif page_token == pagination.page:
+                            nav_items.append(
+                                f'<span class="current" aria-current="page">{page_token}</span>'
+                            )
+                        else:
+                            nav_items.append(page_link(page_token, str(page_token)))
+                    if pagination.page == pagination.total_pages:
+                        nav_items.append('<span class="disabled">Older</span>')
+                    else:
+                        nav_items.append(page_link(pagination.page + 1, "Older"))
+                    pagination_html = (
+                        '<nav class="pagination" aria-label="Report pages">'
+                        + "".join(nav_items)
+                        + "</nav>"
+                    )
                 reports = (
-                    f"<ol>{links}</ol>"
+                    f"<ol>{links}</ol>{pagination_html}"
                     if links
                     else (
                         '<div class="empty-state"><strong>No reports yet</strong>'
@@ -1089,6 +1295,15 @@ def create_server(
                     "box-shadow:0 15px 40px rgba(57,66,60,.06)}"
                     ".report-link span{font-size:1.45rem}.report-link strong{"
                     "font:700 .75rem ui-monospace;color:var(--accent)}"
+                    ".pagination{display:flex;flex-wrap:wrap;justify-content:"
+                    "center;gap:6px;margin:28px 0 0}.pagination a,.pagination "
+                    "span{display:grid;place-items:center;min-width:42px;height:"
+                    "42px;padding:0 12px;border:1px solid var(--line);border-radius:"
+                    "10px;background:rgba(255,255,255,.72);color:var(--ink);"
+                    "text-decoration:none;font:700 .8rem ui-monospace}.pagination "
+                    ".current{background:var(--ink);border-color:var(--ink);color:"
+                    "#fff}.pagination .disabled{opacity:.42}.pagination .ellipsis{"
+                    "border-color:transparent;background:transparent}"
                     ".empty-state{display:grid;gap:7px;padding:24px;border:"
                     "1px dashed var(--line);border-radius:14px;color:#627069;"
                     "background:rgba(255,255,255,.46)}.empty-state strong{"
@@ -1166,10 +1381,12 @@ def create_server(
                         const status = await response.json();
                         searchBusy = Boolean(status.busy);
                         refreshCloseState();
+                        searchButton.textContent =
+                          status.button_label || "Start searching";
                         searchButton.disabled = !status.enabled;
                         searchStatus.textContent = status.message;
                         if (searchStartedHere && status.state === "ready") {{
-                          window.location.reload();
+                          window.location.href = `/?page=1&token=${{encodeURIComponent(token)}}`;
                           return;
                         }}
                         if (status.state === "running") {{

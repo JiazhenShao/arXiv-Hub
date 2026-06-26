@@ -68,6 +68,10 @@ class LibraryItem:
     weight: float
     observed_date: date
     path: str
+    source: str = "library"
+    explicit: bool = False
+    fingerprint: str = ""
+    changed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,10 @@ class InterestPaper:
     paper: Paper
     weight: float
     observed_date: date | None
+    source: str = "report"
+    explicit: bool = True
+    fingerprint: str = ""
+    changed_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -107,7 +107,7 @@ class PublicRepositoryTests(unittest.TestCase):
         self.assertIn("pypdf==6.13.2\n", requirements)
 
     def test_spotlight_launcher_uses_the_unified_supervisor(self) -> None:
-        launcher = (ROOT / "launcher" / "arXiv Hub.launcher.zsh").read_text(
+        launcher = (ROOT / "launcher" / "ArXiv Go.launcher.zsh").read_text(
             encoding="utf-8"
         )
 
@@ -115,7 +115,7 @@ class PublicRepositoryTests(unittest.TestCase):
         self.assertNotIn("scripts/launch_viewer.py", launcher)
 
     def test_repository_does_not_contain_a_spotlight_command_duplicate(self) -> None:
-        self.assertFalse((ROOT / "launcher" / "arXiv Hub.command").exists())
+        self.assertFalse((ROOT / "launcher" / "ArXiv Go.command").exists())
 
     def test_installer_and_uninstaller_manage_only_one_launcher(self) -> None:
         installer = (ROOT / "Install arXiv Hub.command").read_text(
@@ -131,10 +131,13 @@ class PublicRepositoryTests(unittest.TestCase):
             installer,
         )
         self.assertIn(
-            'ditto "$SOURCE_DIR/launcher/arXiv Hub.launcher.zsh" '
+            'ditto "$SOURCE_DIR/launcher/ArXiv Go.launcher.zsh" '
             '"$LAUNCHER_PATH"',
             installer,
         )
+        self.assertIn('LAUNCHER_PATH="$LAUNCHER_DIR/ArXiv Go.command"', installer)
+        self.assertIn('rm -f "$LAUNCHER_DIR/arXiv Hub.command"', installer)
+        self.assertIn('/usr/bin/mdimport -i "$LAUNCHER_PATH"', installer)
         self.assertIn(
             'rm -f "$LAUNCHER_DIR/Configure arXiv Hub.command"',
             installer,
@@ -142,6 +145,14 @@ class PublicRepositoryTests(unittest.TestCase):
         self.assertNotIn("CONFIGURE=", uninstaller)
         self.assertIn(
             'rm -f "$HOME/Applications/Configure arXiv Hub.command"',
+            uninstaller,
+        )
+        self.assertIn(
+            'rm -f "$HOME/Applications/ArXiv Go.command"',
+            uninstaller,
+        )
+        self.assertIn(
+            'rm -f "$HOME/Applications/arXiv Hub.command"',
             uninstaller,
         )
 
