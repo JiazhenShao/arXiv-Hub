@@ -18,14 +18,22 @@ class Paper:
     updated: datetime
     abs_url: str
     pdf_url: str
+    source: str = "arxiv"
 
     def with_version(self, versioned_id: str) -> "Paper":
-        return replace(
-            self,
-            versioned_id=versioned_id,
-            abs_url=f"https://arxiv.org/abs/{versioned_id}",
-            pdf_url=f"https://arxiv.org/pdf/{versioned_id}",
-        )
+        if self.source == "biorxiv":
+            abs_url = f"https://www.biorxiv.org/content/{versioned_id}"
+            pdf_url = f"{abs_url}.full.pdf"
+            return replace(self, versioned_id=versioned_id, abs_url=abs_url, pdf_url=pdf_url)
+        elif self.source == "chemrxiv":
+            return replace(self, versioned_id=versioned_id)
+        else:
+            return replace(
+                self,
+                versioned_id=versioned_id,
+                abs_url=f"https://arxiv.org/abs/{versioned_id}",
+                pdf_url=f"https://arxiv.org/pdf/{versioned_id}",
+            )
 
     def with_dates(self, published: datetime, updated: datetime) -> "Paper":
         return replace(self, published=published, updated=updated)
@@ -43,6 +51,7 @@ class Paper:
             "updated": self.updated.isoformat(),
             "abs_url": self.abs_url,
             "pdf_url": self.pdf_url,
+            "source": self.source,
         }
 
     @classmethod
@@ -59,6 +68,7 @@ class Paper:
             updated=datetime.fromisoformat(str(data["updated"])),
             abs_url=str(data["abs_url"]),
             pdf_url=str(data["pdf_url"]),
+            source=str(data.get("source", "arxiv")),
         )
 
 

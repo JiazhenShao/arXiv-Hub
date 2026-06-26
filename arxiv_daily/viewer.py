@@ -12,6 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
+from time import monotonic, sleep
 from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,7 @@ class ViewerPaper:
     abs_url: str
     pdf_url: str
     rating: str
+    source: str = "arxiv"
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ def parse_viewer_papers(text: str) -> list[ViewerPaper]:
                     abs_url=str(metadata["abs_url"]),
                     pdf_url=str(metadata["pdf_url"]),
                     rating=rating,
+                    source=str(metadata.get("source", "arxiv")),
                 )
             )
         except (KeyError, TypeError) as exc:
@@ -161,12 +164,33 @@ def generate_html_companion(
         if interactive
         else ""
     )
+    _source_labels = {
+        "biorxiv": "bioRxiv",
+        "medrxiv": "medRxiv",
+        "chemrxiv": "chemRxiv",
+    }
+    _source_colors = {
+        "biorxiv": "#1a6e3e",
+        "medrxiv": "#1a5c6e",
+        "chemrxiv": "#5a3580",
+    }
     cards = []
     for index, paper in enumerate(papers, start=1):
         authors = _escape(format_authors(paper.authors))
-        safe_versioned_id = quote(paper.versioned_id, safe="/.-")
-        abs_url = f"https://arxiv.org/abs/{safe_versioned_id}"
-        pdf_url = f"https://arxiv.org/pdf/{safe_versioned_id}"
+        source = paper.source or "arxiv"
+        if source == "arxiv":
+            safe_versioned_id = quote(paper.versioned_id, safe="/.-")
+            abs_url = f"https://arxiv.org/abs/{safe_versioned_id}"
+            pdf_url = f"https://arxiv.org/pdf/{safe_versioned_id}"
+        else:
+            abs_url = _escape(paper.abs_url)
+            pdf_url = _escape(paper.pdf_url)
+        source_label = _source_labels.get(source, "arXiv")
+        source_color = _source_colors.get(source, "#b9472f")
+        source_badge = (
+            f'<span class="source-badge" style="background:{source_color}">'
+            f"{source_label}</span>"
+        )
         categories = " ".join(
             f"<span class=\"category\">{_escape(category)}</span>"
             for category in paper.categories
@@ -180,6 +204,7 @@ def generate_html_companion(
     <div class="paper-heading">
       <h2>{_escape(paper.title)}</h2>
       <div class="score-links">
+        {source_badge}
         <a href="{_escape(pdf_url)}" target="_blank"
            rel="noopener noreferrer">PDF</a>
         <a href="{_escape(abs_url)}" target="_blank" rel="noopener noreferrer">{_escape(paper.versioned_id)}</a>
@@ -206,7 +231,7 @@ def generate_html_companion(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Daily arXiv Recommendations — {_escape(report_date)}</title>
+  <title>Daily Preprint Recommendations — {_escape(report_date)}</title>
   <link rel="stylesheet" href="{asset}/katex.min.css">
   <style>
     :root {{
@@ -291,6 +316,11 @@ def generate_html_companion(
       flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-start;
       font: .72rem/1.3 ui-monospace, SFMono-Regular, monospace;
     }}
+    .source-badge {{
+      display: inline-block; padding: 3px 8px; border-radius: 999px;
+      font: 700 .65rem/1.3 ui-monospace, SFMono-Regular, monospace;
+      color: #fff; letter-spacing: .04em; text-transform: uppercase;
+    }}
     .authors {{ color: var(--muted); margin: 9px 0; }}
     .categories {{ display: flex; flex-wrap: wrap; gap: 6px; }}
     .category {{
@@ -329,7 +359,7 @@ def generate_html_companion(
     <header>
       <div>
         <div class="eyebrow">Verified paper digest</div>
-        <h1>Daily arXiv<br>Recommendations</h1>
+        <h1>Daily Preprint<br>Recommendations</h1>
         <p>{_escape(report_date)} · {len(papers)} papers</p>
       </div>
       <div class="toolbar">{status}{close_button}</div>
@@ -353,6 +383,28 @@ def generate_html_companion(
       }});
     }}
     const viewer = window.ARXIV_VIEWER;
+    if (viewer.interactive) {{
+      function sendHeartbeat() {{
+        fetch(`/api/heartbeat?token=${{encodeURIComponent(viewer.token)}}`)
+          .catch(() => {{}});
+      }}
+      sendHeartbeat();
+      window.setInterval(sendHeartbeat, 500);
+      let navigatingAway = false;
+      document.addEventListener("click", (event) => {{
+        const link = event.target.closest("a");
+        if (link && link.target !== "_blank" && link.href
+            && link.origin === location.origin) {{
+          navigatingAway = true;
+        }}
+      }});
+      window.addEventListener("pagehide", () => {{
+        if (!navigatingAway) {{
+          fetch(`/api/close?token=${{encodeURIComponent(viewer.token)}}`,
+                {{keepalive: true}}).catch(() => {{}});
+        }}
+      }});
+    }}
     async function post(path, payload) {{
       const response = await fetch(`${{path}}?token=${{encodeURIComponent(viewer.token)}}`, {{
         method: "POST",
@@ -386,6 +438,7 @@ def generate_html_companion(
           searchButton.disabled = !status.enabled;
           searchStatus.textContent = status.message;
           if (searchStartedHere && status.state === "ready") {{
+            navigatingAway = true;
             window.location.href = `/?token=${{encodeURIComponent(viewer.token)}}`;
           }}
           if (status.state === "running") {{
@@ -607,8 +660,10 @@ def create_server(
     now_provider: Callable[[], datetime] | None = None,
     search_runner: Callable[[date], SearchResult] | None = None,
     downloader: PaperDownloader | None = None,
+    configure_runner: Callable[[], str | None] | None = None,
     timezone_name: str = DEFAULT_TIMEZONE,
     search_start_time: time = DEFAULT_SEARCH_START_TIME,
+    idle_timeout_seconds: float | None = None,
 ) -> ThreadingHTTPServer:
     record_dir = record_dir.resolve()
     assets_dir = assets_dir.resolve()
@@ -622,6 +677,9 @@ def create_server(
     state_lock = Lock()
     download_io_lock = Lock()
     active_job = {"kind": "", "date": ""}
+    # Startup grace: the browser needs a moment to open and load the page
+    # before the first heartbeat arrives.
+    heartbeat = {"last": monotonic() + 15.0}
     search_state = {
         "date": "",
         "state": "idle",
@@ -796,7 +854,7 @@ def create_server(
             search_state.update(
                 date=today_text,
                 state="running",
-                message="Searching verified arXiv metadata...",
+                message="Searching preprint databases...",
             )
 
         def worker() -> None:
@@ -1027,6 +1085,29 @@ def create_server(
             if not self._authorized():
                 self._error(HTTPStatus.NOT_FOUND, "Not found")
                 return
+            if parsed.path == "/api/heartbeat":
+                with state_lock:
+                    heartbeat["last"] = monotonic()
+                self._send(
+                    HTTPStatus.OK,
+                    b"{}",
+                    "application/json; charset=utf-8",
+                )
+                return
+            if parsed.path == "/api/close":
+                # Fired by the page's pagehide beacon when the tab is closing
+                # (not navigating). Shut down immediately unless a job is busy;
+                # the heartbeat monitor is the fallback if the beacon is missed.
+                with state_lock:
+                    busy = bool(active_job["kind"])
+                self._send(
+                    HTTPStatus.OK,
+                    b"{}",
+                    "application/json; charset=utf-8",
+                )
+                if not busy:
+                    Thread(target=self.server.shutdown, daemon=True).start()
+                return
             if parsed.path == "/api/search/status":
                 body = json.dumps(search_status()).encode("utf-8")
                 self._send(
@@ -1060,7 +1141,7 @@ def create_server(
                 body = (
                     "<!doctype html><html><head><meta charset=\"utf-8\">"
                     "<meta name=\"viewport\" content=\"width=device-width\">"
-                    "<title>Daily arXiv Viewer</title>"
+                    "<title>Daily Preprint Viewer</title>"
                     "<style>"
                     ":root{--ink:#17211d;--accent:#a13d2b;--line:#d8d4c7}"
                     "*{box-sizing:border-box}body{margin:0;color:var(--ink);"
@@ -1079,7 +1160,7 @@ def create_server(
                     "box-shadow:0 15px 40px rgba(57,66,60,.06)}"
                     ".report-link span{font-size:1.45rem}.report-link strong{"
                     "font:700 .75rem ui-monospace;color:var(--accent)}"
-                    ".actions{display:grid;grid-template-columns:repeat(2,"
+                    ".actions{display:grid;grid-template-columns:repeat(3,"
                     "minmax(0,1fr));gap:18px;align-items:start;margin:0 0 30px}"
                     ".action-column{display:grid;grid-template-rows:auto "
                     "minmax(1.25rem,auto);gap:8px;min-width:0}"
@@ -1087,6 +1168,8 @@ def create_server(
                     "18px;border-radius:999px;cursor:pointer;font:700 1rem/1.2 "
                     "Georgia,serif}#close-server{border:1px solid #8e3224;"
                     "background:#fff6f2;color:#8e3224}"
+                    "#configure{border:1px solid #916515;"
+                    "background:#fff9e8;color:#76500f}"
                     "#start-search{border:1px solid #246b50;"
                     "background:#f1fbf5;color:#246b50}"
                     "#start-search:disabled{"
@@ -1098,7 +1181,7 @@ def create_server(
                     "margin:0}@media(max-width:620px){.actions{"
                     "grid-template-columns:1fr}}</style></head><body><main>"
                     "<div class=\"eyebrow\">Private localhost viewer</div>"
-                    "<h1>Daily arXiv<br>Reports</h1>"
+                    "<h1>Daily Preprint<br>Reports</h1>"
                     '<div class="actions">'
                     '<div class="action-column search-control">'
                     '<button id="start-search" class="primary-action" disabled>'
@@ -1108,13 +1191,19 @@ def create_server(
                     '<div class="action-column close-control">'
                     '<button id="close-server" class="primary-action">'
                     "Close Server</button>"
-                    '<span id="status" aria-live="polite"></span></div></div>'
+                    '<span id="status" aria-live="polite"></span></div>'
+                    '<div class="action-column configure-control">'
+                    '<button id="configure" class="primary-action">Configure</button>'
+                    '<span id="configure-status" aria-live="polite"></span>'
+                    "</div></div>"
                     f"<ol>{links}</ol>"
                     f"""<script>
                     const token = {json.dumps(token)};
                     const searchButton = document.getElementById("start-search");
                     const searchStatus = document.getElementById("search-status");
                     const closeButton = document.getElementById("close-server");
+                    const configureButton = document.getElementById("configure");
+                    const configureStatus = document.getElementById("configure-status");
                     let searchStartedHere = false;
                     let searchBusy = false;
                     function refreshCloseState() {{
@@ -1144,6 +1233,7 @@ def create_server(
                         searchButton.disabled = !status.enabled;
                         searchStatus.textContent = status.message;
                         if (searchStartedHere && status.state === "ready") {{
+                          navigatingAway = true;
                           window.location.reload();
                           return;
                         }}
@@ -1169,6 +1259,26 @@ def create_server(
                     }});
                     refreshSearchStatus();
                     window.setInterval(refreshSearchStatus, 30000);
+                    function sendHeartbeat() {{
+                      fetch(`/api/heartbeat?token=${{encodeURIComponent(token)}}`)
+                        .catch(() => {{}});
+                    }}
+                    sendHeartbeat();
+                    window.setInterval(sendHeartbeat, 500);
+                    let navigatingAway = false;
+                    document.addEventListener("click", (event) => {{
+                      const link = event.target.closest("a");
+                      if (link && link.target !== "_blank" && link.href
+                          && link.origin === location.origin) {{
+                        navigatingAway = true;
+                      }}
+                    }});
+                    window.addEventListener("pagehide", () => {{
+                      if (!navigatingAway) {{
+                        fetch(`/api/close?token=${{encodeURIComponent(token)}}`,
+                              {{keepalive: true}}).catch(() => {{}});
+                      }}
+                    }});
                     closeButton.addEventListener(
                       "click", async () => {{
                         closeButton.disabled = true;
@@ -1193,6 +1303,28 @@ def create_server(
                         }}
                       }}
                     );
+                    configureButton.addEventListener("click", async () => {{
+                      configureButton.disabled = true;
+                      configureStatus.textContent = "Opening...";
+                      try {{
+                        const response = await fetch(
+                          `/api/configure/start?token=${{encodeURIComponent(token)}}`,
+                          {{
+                            method: "POST",
+                            headers: {{"Content-Type": "application/json"}},
+                            body: "{{}}"
+                          }}
+                        );
+                        if (!response.ok) throw new Error(await response.text());
+                        const result = await response.json();
+                        window.open(result.url, "_blank");
+                        configureStatus.textContent = "Opened in new tab.";
+                      }} catch (error) {{
+                        configureStatus.textContent = "Could not open configure.";
+                      }} finally {{
+                        configureButton.disabled = false;
+                      }}
+                    }});
                     </script></main></body></html>"""
                 ).encode("utf-8")
                 self._send(HTTPStatus.OK, body, "text/html; charset=utf-8")
@@ -1292,6 +1424,17 @@ def create_server(
                     "application/json; charset=utf-8",
                 )
                 return
+            if parsed.path == "/api/configure/start":
+                if server.configure_runner is None:
+                    self._error(HTTPStatus.SERVICE_UNAVAILABLE, "Configure unavailable")
+                    return
+                url = server.configure_runner()
+                if url is None:
+                    self._error(HTTPStatus.CONFLICT, "Configure is already running")
+                    return
+                body = json.dumps({"ok": True, "url": url}).encode("utf-8")
+                self._send(HTTPStatus.OK, body, "application/json; charset=utf-8")
+                return
             if parsed.path == "/api/shutdown":
                 with state_lock:
                     if active_job["kind"]:
@@ -1318,4 +1461,20 @@ def create_server(
         )
     )
     server.downloader = downloader
+    server.configure_runner = configure_runner
+
+    if idle_timeout_seconds is not None:
+        def _idle_monitor() -> None:
+            while True:
+                sleep(0.5)
+                with state_lock:
+                    if active_job["kind"]:
+                        continue
+                    idle = monotonic() - heartbeat["last"]
+                if idle > idle_timeout_seconds:
+                    server.shutdown()
+                    return
+
+        Thread(target=_idle_monitor, daemon=True).start()
+
     return server

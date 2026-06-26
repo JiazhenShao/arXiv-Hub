@@ -220,7 +220,7 @@ def rank_candidates(
             )[:2]
         )
         why = (
-            f"Selected from verified arXiv metadata: semantic {semantic:.2f}, "
+            f"Selected from verified preprint metadata: semantic {semantic:.2f}, "
             f"priority {priority:.2f}, lexical {lexical:.2f}, recency {recency:.2f}."
         )
         ranked.append(

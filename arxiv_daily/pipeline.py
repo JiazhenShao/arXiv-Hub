@@ -23,6 +23,33 @@ class PaperSource(Protocol):
     def fetch_by_ids(self, arxiv_ids: list[str]) -> list[Paper]: ...
 
 
+class MultiSource:
+    """Aggregates multiple PaperSource implementations into one."""
+
+    def __init__(self, sources: list[PaperSource]) -> None:
+        self.sources = sources
+
+    def fetch_candidates(self, start: date, end: date) -> list[Paper]:
+        seen: set[str] = set()
+        papers: list[Paper] = []
+        for source in self.sources:
+            for paper in source.fetch_candidates(start, end):
+                if paper.arxiv_id not in seen:
+                    seen.add(paper.arxiv_id)
+                    papers.append(paper)
+        return papers
+
+    def fetch_by_ids(self, arxiv_ids: list[str]) -> list[Paper]:
+        seen: set[str] = set()
+        papers: list[Paper] = []
+        for source in self.sources:
+            for paper in source.fetch_by_ids(arxiv_ids):
+                if paper.arxiv_id not in seen:
+                    seen.add(paper.arxiv_id)
+                    papers.append(paper)
+        return papers
+
+
 class PaperEmbedder(Protocol):
     label: str
 
@@ -198,7 +225,7 @@ class DailyPipeline:
         try:
             fetched = self.source.fetch_candidates(query_start, run_date)
         except Exception as exc:
-            raise PipelineError(f"Verified arXiv retrieval failed: {exc}") from exc
+            raise PipelineError(f"Preprint retrieval failed: {exc}") from exc
         if not fetched:
             return RunResult(status="skipped-no-announcement")
         latest_announcement = max(paper.published.date() for paper in fetched)

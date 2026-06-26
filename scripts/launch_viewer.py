@@ -11,6 +11,7 @@ import webbrowser
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
+from threading import Lock, Thread
 from urllib.parse import quote
 
 
@@ -33,8 +34,6 @@ CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 def select_report_date(record_dir: Path, requested: str | None) -> str | None:
     dates = list_report_dates(record_dir)
-    if not dates:
-        raise ValueError("No dated Markdown reports are available")
     if requested is not None:
         if requested not in dates:
             raise ValueError(f"No Markdown report exists for {requested}")
@@ -125,6 +124,50 @@ def make_daily_runner(
             python_path=python_path,
             runner=runner,
         )
+
+    return run
+
+
+def make_configure_runner(
+    *,
+    profile_path: Path,
+    python_path: Path,
+) -> Callable[[], str | None]:
+    lock = Lock()
+
+    def run() -> str | None:
+        if not lock.acquire(blocking=False):
+            return None
+        released = False
+        try:
+            proc = subprocess.Popen(
+                [
+                    str(python_path),
+                    "-u",
+                    str(SKILL_ROOT / "scripts" / "setup_profile.py"),
+                    "--profile", str(profile_path),
+                    "--no-open",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            url = None
+            for line in proc.stdout:
+                if line.strip().startswith("arXiv Hub setup: "):
+                    url = line.strip().removeprefix("arXiv Hub setup: ")
+                    break
+            if url:
+                released = True
+                Thread(target=lambda: (proc.wait(), lock.release()), daemon=True).start()
+                return url
+            proc.wait()
+            return None
+        except Exception:
+            return None
+        finally:
+            if not released:
+                lock.release()
 
     return run
 
@@ -230,11 +273,16 @@ def main() -> int:
             python_path=Path(sys.executable),
         ),
         downloader=make_downloader(config),
+        configure_runner=make_configure_runner(
+            profile_path=args.profile,
+            python_path=Path(sys.executable),
+        ),
         timezone_name=config.viewer_timezone,
         search_start_time=config.search_start_time,
+        idle_timeout_seconds=1.5,
     )
     url = viewer_url(server.server_port, token, report_date)
-    print(f"Daily arXiv Viewer: {url}")
+    print(f"Daily Preprint Viewer: {url}")
     print(f"Refreshed {len(generated)} offline HTML report(s).")
     available_at = config.search_start_time.strftime("%-I:%M %p")
     print(

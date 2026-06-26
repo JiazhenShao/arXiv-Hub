@@ -110,9 +110,16 @@ class PublicRepositoryTests(unittest.TestCase):
         for path in ROOT.rglob("*"):
             if not path.is_file() or any(part in banned_parts for part in path.parts):
                 continue
-            if path.suffix.lower() in {".ttf", ".woff", ".woff2", ".png"}:
+            if path.suffix.lower() in {
+                ".ttf", ".woff", ".woff2", ".png",
+                ".jpg", ".jpeg", ".gif", ".ico", ".icns",
+            }:
                 continue
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # Binary file (banned identifiers are ASCII text); skip it.
+                continue
             inspected += 1
             for value in banned_text:
                 self.assertNotIn(value, text, str(path))

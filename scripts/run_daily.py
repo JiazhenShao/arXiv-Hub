@@ -13,9 +13,11 @@ sys.path.insert(0, str(SKILL_ROOT))
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
 
 from arxiv_daily.arxiv_api import ArxivClient  # noqa: E402
+from arxiv_daily.biorxiv_api import BiorxivClient  # noqa: E402
+from arxiv_daily.chemrxiv_api import ChemrxivClient  # noqa: E402
 from arxiv_daily.config import ProfileConfig  # noqa: E402
 from arxiv_daily.embedding import Specter2Embedder  # noqa: E402
-from arxiv_daily.pipeline import DailyPipeline, PipelineError  # noqa: E402
+from arxiv_daily.pipeline import DailyPipeline, MultiSource, PipelineError  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,15 +58,41 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     config = ProfileConfig.load(args.profile)
-    source = ArxivClient(
-        config.categories,
-        user_agent=config.user_agent,
-        min_interval_seconds=config.api_min_interval_seconds,
-        timeout_seconds=config.api_timeout_seconds,
-        state_dir=config.record_dir / ".state",
-        retry_backoffs=config.api_retry_backoffs,
-        retry_deadline_seconds=config.api_retry_deadline_seconds,
-    )
+    sources = [
+        ArxivClient(
+            config.categories,
+            user_agent=config.user_agent,
+            min_interval_seconds=config.api_min_interval_seconds,
+            timeout_seconds=config.api_timeout_seconds,
+            state_dir=config.record_dir / ".state",
+            retry_backoffs=config.api_retry_backoffs,
+            retry_deadline_seconds=config.api_retry_deadline_seconds,
+        )
+    ]
+    for extra in config.extra_sources:
+        subjects = list(extra.subjects) if extra.subjects else None
+        if extra.type in ("biorxiv", "medrxiv"):
+            sources.append(
+                BiorxivClient(
+                    server=extra.type,
+                    subjects=subjects,
+                    user_agent=config.user_agent,
+                    min_interval_seconds=config.api_min_interval_seconds,
+                    timeout_seconds=config.api_timeout_seconds,
+                    retry_backoffs=config.api_retry_backoffs,
+                )
+            )
+        elif extra.type == "chemrxiv":
+            sources.append(
+                ChemrxivClient(
+                    subjects=subjects,
+                    user_agent=config.user_agent,
+                    min_interval_seconds=config.api_min_interval_seconds,
+                    timeout_seconds=config.api_timeout_seconds,
+                    retry_backoffs=config.api_retry_backoffs,
+                )
+            )
+    source = MultiSource(sources)
     embedder = Specter2Embedder(
         base_model=config.base_model,
         base_revision=config.base_revision,

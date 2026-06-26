@@ -17,7 +17,7 @@ editable during setup or later in `profile.toml`.
 - Internet access for installation and arXiv searches
 - Approximately 5 GB free disk space for Python, PyTorch, and SPECTER2
 
-Codex, Homebrew, and a system Python installation are not required.
+Homebrew and a system Python installation are not required.
 
 ## Install
 
@@ -56,8 +56,8 @@ Application files and the private runtime:
 Spotlight launchers:
 
 ```text
+~/Applications/arXiv Hub.app
 ~/Applications/arXiv Hub.command
-~/Applications/Configure arXiv Hub.command
 ```
 
 Default user data:
@@ -68,8 +68,8 @@ Default user data:
 ~/Documents/arXiv Hub/Papers Archive
 ```
 
-Use `Configure arXiv Hub` from Spotlight to reopen the setup wizard. Existing
-reports and papers are not moved automatically when paths change.
+Use the **Configure** button in the dashboard to reopen the setup wizard.
+Existing reports and papers are not moved automatically when paths change.
 
 ## Update And Uninstall
 
@@ -102,5 +102,12 @@ Run the tests with Python 3.12 in an environment containing
 ```sh
 python -W error::ResourceWarning -m unittest discover -s tests -v
 ```
+
+## Credits
+
+arXiv Hub was built with the help of AI coding agents:
+
+- [Claude Code](https://claude.com/claude-code) — Anthropic's agentic CLI.
+- [Codex](https://openai.com/codex/) — OpenAI's coding agent.
 
 This project is licensed under the [MIT License](LICENSE).

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -12,6 +12,14 @@ class Topic:
     name: str
     weight: float
     phrases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExtraSource:
+    """Configuration for an additional preprint source (biorxiv, medrxiv, chemrxiv)."""
+
+    type: str  # "biorxiv", "medrxiv", or "chemrxiv"
+    subjects: tuple[str, ...]  # empty tuple means all subjects
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,7 @@ class ProfileConfig:
     api_timeout_seconds: float = 60.0
     viewer_timezone: str = "America/Chicago"
     search_start_time: time = time(20, 0)
+    extra_sources: tuple[ExtraSource, ...] = ()
 
     @property
     def topic_weights(self) -> dict[str, float]:
@@ -80,6 +89,25 @@ class ProfileConfig:
             )
             for item in data["topics"]
         )
+        valid_source_types = {"biorxiv", "medrxiv", "chemrxiv"}
+        extra_sources_raw = data.get("extra_sources", [])
+        if not isinstance(extra_sources_raw, list):
+            raise ValueError("[extra_sources] must be a list of source tables")
+        extra_sources: list[ExtraSource] = []
+        for entry in extra_sources_raw:
+            if not isinstance(entry, dict):
+                raise ValueError("Each [[extra_sources]] entry must be a table")
+            src_type = str(entry.get("type", "")).strip().lower()
+            if src_type not in valid_source_types:
+                raise ValueError(
+                    f"extra_sources type must be one of {sorted(valid_source_types)}, "
+                    f"got {src_type!r}"
+                )
+            subjects = tuple(
+                str(s).strip() for s in entry.get("subjects", []) if str(s).strip()
+            )
+            extra_sources.append(ExtraSource(type=src_type, subjects=subjects))
+
         return cls(
             record_dir=Path(paths["record_dir"]).expanduser(),
             active_library_dir=Path(paths["active_library_dir"]).expanduser(),
@@ -116,4 +144,5 @@ class ProfileConfig:
             api_timeout_seconds=float(source.get("timeout_seconds", 60.0)),
             viewer_timezone=viewer_timezone,
             search_start_time=search_start_time,
+            extra_sources=tuple(extra_sources),
         )

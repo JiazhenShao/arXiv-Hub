@@ -9,7 +9,6 @@ UV_PYTHON_INSTALL_DIR="$APP_SUPPORT/python"
 PROFILE_PATH="$APP_SUPPORT/profile.toml"
 LAUNCHER_DIR="$HOME/Applications"
 LAUNCHER_PATH="$LAUNCHER_DIR/arXiv Hub.command"
-CONFIGURE_PATH="$LAUNCHER_DIR/Configure arXiv Hub.command"
 SOURCE_DIR="${0:A:h}"
 UV_VERSION="0.11.21"
 
@@ -95,9 +94,41 @@ mv "$NEW_VENV" "$VENV_DIR"
 SWITCH_COMPLETE=1
 
 ditto "$SOURCE_DIR/launcher/arXiv Hub.command" "$LAUNCHER_PATH"
-ditto "$SOURCE_DIR/launcher/Configure arXiv Hub.command" "$CONFIGURE_PATH"
 chmod 755 "$LAUNCHER_PATH"
-chmod 755 "$CONFIGURE_PATH"
+
+print "Creating arXiv Hub app bundle..."
+APP_BUNDLE="$LAUNCHER_DIR/arXiv Hub.app"
+rm -rf "$APP_BUNDLE"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+clang -fobjc-arc -framework AppKit -framework Foundation \
+  "$SOURCE_DIR/launcher/launcher.m" \
+  -o "$APP_BUNDLE/Contents/MacOS/arXiv Hub"
+chmod +x "$APP_BUNDLE/Contents/MacOS/arXiv Hub"
+ditto "$SOURCE_DIR/launcher/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLISTEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>arXiv Hub</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.arxivhub.viewer</string>
+    <key>CFBundleName</key>
+    <string>arXiv Hub</string>
+    <key>CFBundleDisplayName</key>
+    <string>arXiv Hub</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+</dict>
+</plist>
+PLISTEOF
 
 rm -rf "$APP_DIR.previous" "$VENV_DIR.previous"
 print ""

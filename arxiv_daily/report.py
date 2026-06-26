@@ -39,17 +39,17 @@ def render_report(
     selected: list[RankedPaper],
 ) -> str:
     lines = [
-        f"# Daily arXiv Recommendations — {run_date.isoformat()}",
+        f"# Daily Preprint Recommendations — {run_date.isoformat()}",
         "",
         f"- **Announcement batch:** {announcement_date.isoformat()}",
         f"- **Query window:** {query_start.isoformat()} to {run_date.isoformat()}",
-        f"- **Fetched from arXiv:** {fetched_at.astimezone(timezone.utc).isoformat()}",
+        f"- **Fetched at:** {fetched_at.astimezone(timezone.utc).isoformat()}",
         f"- **Verified unseen candidates:** {candidate_count}",
         f"- **Embedding model:** `{model_label}`",
         f"- **Selected papers:** {len(selected)}",
         "",
-        "Every paper below came from a successfully parsed official arXiv Atom response.",
-        "Titles and abstracts are copied from that metadata; selection explanations are deterministic score summaries.",
+        "Papers below were retrieved from official preprint server APIs (arXiv, bioRxiv, chemRxiv).",
+        "Titles and abstracts are copied verbatim from that metadata; selection explanations are deterministic score summaries.",
         "",
     ]
     for index, item in enumerate(selected, start=1):
@@ -58,12 +58,17 @@ def render_report(
         authors = format_authors(paper.authors)
         categories = ", ".join(f"`{value}`" for value in paper.categories)
         matched = ", ".join(item.matched_topics) or "category prior only"
+        source_label = {
+            "biorxiv": "bioRxiv",
+            "medrxiv": "medRxiv",
+            "chemrxiv": "chemRxiv",
+        }.get(paper.source, "arXiv")
         lines.extend(
             [
                 f"## {index}. [{paper.title}]({paper.abs_url})",
                 "",
                 f"<!-- arxiv-record:{metadata} -->",
-                f"- **arXiv:** [`{paper.versioned_id}`]({paper.abs_url}) · [PDF]({paper.pdf_url})",
+                f"- **{source_label}:** [`{paper.versioned_id}`]({paper.abs_url}) · [PDF]({paper.pdf_url})",
                 f"- **Submitted:** {paper.published.date().isoformat()} · **Updated:** {paper.updated.date().isoformat()}",
                 f"- **Authors:** {authors}",
                 f"- **Categories:** {categories}",

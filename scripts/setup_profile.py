@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import secrets
 import sys
+import tomllib
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,15 +48,84 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def setup_page(token: str, preset_text: str) -> str:
+def _read_existing_profile(profile_path: Path) -> dict[str, str] | None:
+    try:
+        with profile_path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    paths = data.get("paths", {})
+    viewer = data.get("viewer", {})
+    source = data.get("source", {})
+    user_agent = str(source.get("user_agent", ""))
+    email_match = re.search(r"\(([^)]+)\)", user_agent)
+    source_types = {str(s.get("type", "")) for s in data.get("extra_sources", [])}
+    biorxiv_subjects = ", ".join(
+        str(subj)
+        for s in data.get("extra_sources", [])
+        if s.get("type") == "biorxiv"
+        for subj in s.get("subjects", [])
+    )
+    chemrxiv_subjects = ", ".join(
+        str(subj)
+        for s in data.get("extra_sources", [])
+        if s.get("type") == "chemrxiv"
+        for subj in s.get("subjects", [])
+    )
+    return {
+        "record_dir": str(paths.get("record_dir", "")),
+        "active_library_dir": str(paths.get("active_library_dir", "")),
+        "archive_library_dir": str(paths.get("archive_library_dir", "")),
+        "timezone": str(viewer.get("timezone", "America/Chicago")),
+        "search_time": str(viewer.get("search_time", "20:00")),
+        "contact_email": email_match.group(1) if email_match else "",
+        "has_biorxiv": "true" if "biorxiv" in source_types else "",
+        "has_chemrxiv": "true" if "chemrxiv" in source_types else "",
+        "biorxiv_subjects": biorxiv_subjects,
+        "chemrxiv_subjects": chemrxiv_subjects,
+    }
+
+
+def _extract_preset_text(profile_path: Path) -> str | None:
+    try:
+        text = profile_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^\[(?:categories|ranking|model)\]", text, re.MULTILINE)
+    if not match:
+        return None
+    preset = text[match.start():]
+    # Strip [[extra_sources]] blocks — those are managed by the checkboxes
+    preset = re.sub(r"\n*\[\[extra_sources\]\][\s\S]*$", "", preset)
+    return preset.strip() + "\n"
+
+
+def setup_page(token: str, preset_text: str, existing: dict[str, str] | None = None) -> str:
     hub = Path.home() / "Documents" / "arXiv Hub"
-    values = {
+    defaults = {
         "reports": str(hub / "Reports"),
         "papers": str(hub / "Papers"),
         "archive": str(hub / "Papers Archive"),
-        "preset": preset_text,
+        "timezone": "America/Chicago",
+        "search_time": "20:00",
+        "contact_email": "",
     }
+    if existing:
+        for key in ("record_dir", "active_library_dir", "archive_library_dir",
+                    "timezone", "search_time", "contact_email"):
+            form_key = {
+                "record_dir": "reports",
+                "active_library_dir": "papers",
+                "archive_library_dir": "archive",
+            }.get(key, key)
+            if existing.get(key):
+                defaults[form_key] = existing[key]
+    values = {**defaults, "preset": preset_text}
     escaped = {key: html.escape(value, quote=True) for key, value in values.items()}
+    biorxiv_checked = "checked" if existing and existing.get("has_biorxiv") else ""
+    chemrxiv_checked = "checked" if existing and existing.get("has_chemrxiv") else ""
+    biorxiv_subjects_val = html.escape(existing.get("biorxiv_subjects", "") if existing else "", quote=True)
+    chemrxiv_subjects_val = html.escape(existing.get("chemrxiv_subjects", "") if existing else "", quote=True)
     config = json.dumps({"token": token}, ensure_ascii=True).replace("<", "\\u003c")
     return f"""<!doctype html>
 <html lang="en">
@@ -87,6 +158,15 @@ def setup_page(token: str, preset_text: str) -> str:
     .wide {{ grid-column:1/-1; }}
     details {{ margin-top:22px; }}
     summary {{ cursor:pointer; color:var(--accent); font-weight:700; }}
+    .sources-section {{ margin-top:22px; border-top:1px solid var(--line); padding-top:18px; }}
+    .sources-section h3 {{ margin:0 0 14px; font-size:1rem; }}
+    .source-row {{ display:grid; grid-template-columns:auto 1fr; gap:10px 14px;
+      align-items:center; margin-bottom:12px; }}
+    .source-row input[type=checkbox] {{ width:auto; margin:0; accent-color:var(--green); }}
+    .source-row label {{ font-weight:700; margin:0; }}
+    .source-row .source-subjects {{ width:100%; border:1px solid var(--line);
+      border-radius:10px; background:#fff; color:var(--ink); padding:9px 12px;
+      font:inherit; font-size:.88rem; }}
     button {{ margin-top:24px; border:1px solid var(--green); border-radius:999px;
       padding:13px 24px; background:#eff9f3; color:var(--green);
       font:700 1rem Georgia,serif; cursor:pointer; }}
@@ -111,11 +191,36 @@ def setup_page(token: str, preset_text: str) -> str:
       <label class="wide"><span>Older paper archive</span>
         <input name="archive_library_dir" value="{escaped["archive"]}" required></label>
       <label><span>Timezone</span>
-        <input id="timezone" name="timezone" value="America/Chicago" required></label>
+        <input id="timezone" name="timezone" value="{escaped["timezone"]}" required></label>
       <label><span>Search available after</span>
-        <input name="search_time" type="time" value="20:00" required></label>
+        <input name="search_time" type="time" value="{escaped["search_time"]}" required></label>
       <label class="wide"><span>Contact email for arXiv requests</span>
-        <input name="contact_email" type="email" placeholder="you@example.org" required></label>
+        <input name="contact_email" type="email" placeholder="you@example.org" value="{escaped["contact_email"]}" required></label>
+    </div>
+    <div class="sources-section">
+      <h3>Additional preprint sources</h3>
+      <p style="color:var(--muted);font-size:.9rem;margin:0 0 14px">
+        bioRxiv and chemRxiv papers will be ranked alongside arXiv using the
+        same embedding model. Leave subjects blank to fetch all subjects.
+      </p>
+      <div class="source-row">
+        <input type="checkbox" id="enable_biorxiv" name="enable_biorxiv" {biorxiv_checked}>
+        <label for="enable_biorxiv">bioRxiv</label>
+        <span></span>
+        <input class="source-subjects" name="biorxiv_subjects"
+               placeholder="e.g. biophysics, biochemistry, molecular-biology"
+               aria-label="bioRxiv subjects (comma-separated)"
+               value="{biorxiv_subjects_val}">
+      </div>
+      <div class="source-row">
+        <input type="checkbox" id="enable_chemrxiv" name="enable_chemrxiv" {chemrxiv_checked}>
+        <label for="enable_chemrxiv">chemRxiv</label>
+        <span></span>
+        <input class="source-subjects" name="chemrxiv_subjects"
+               placeholder="e.g. physical-chemistry, biochemistry"
+               aria-label="chemRxiv subjects (comma-separated)"
+               value="{chemrxiv_subjects_val}">
+      </div>
     </div>
     <details>
       <summary>Advanced: categories, topics, weights, and model</summary>
@@ -129,8 +234,11 @@ def setup_page(token: str, preset_text: str) -> str:
 </main>
 <script>
   const config = {config};
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (timezone) document.getElementById("timezone").value = timezone;
+  const tzField = document.getElementById("timezone");
+  if (!tzField.value) {{
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (detected) tzField.value = detected;
+  }}
   document.getElementById("setup").addEventListener("submit", async (event) => {{
     event.preventDefault();
     const status = document.getElementById("status");
@@ -163,6 +271,7 @@ def create_setup_server(
     profile_path: Path,
     preset_text: str,
     token: str,
+    existing: dict[str, str] | None = None,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
@@ -184,7 +293,7 @@ def create_setup_server(
             if urlparse(self.path).path != "/" or not self._authorized():
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            body = setup_page(token, preset_text).encode("utf-8")
+            body = setup_page(token, preset_text, existing).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -208,10 +317,21 @@ def create_setup_server(
                     search_time=str(payload["search_time"]),
                     contact_email=str(payload["contact_email"]),
                 )
-                profile_text = build_profile_from_preset_text(
-                    values,
-                    str(payload["preset_text"]),
-                )
+                preset_text = str(payload["preset_text"])
+                for source_type in ("biorxiv", "chemrxiv"):
+                    if payload.get(f"enable_{source_type}"):
+                        subjects_raw = str(payload.get(f"{source_type}_subjects", ""))
+                        subjects = [s.strip() for s in subjects_raw.split(",") if s.strip()]
+                        subjects_toml = (
+                            "[" + ", ".join(f'"{s}"' for s in subjects) + "]"
+                            if subjects else "[]"
+                        )
+                        preset_text = (
+                            preset_text.rstrip()
+                            + f'\n\n[[extra_sources]]\ntype = "{source_type}"\n'
+                            f"subjects = {subjects_toml}\n"
+                        )
+                profile_text = build_profile_from_preset_text(values, preset_text)
                 for directory in (
                     values.record_dir,
                     values.active_library_dir,
@@ -233,19 +353,24 @@ def create_setup_server(
 
 def main() -> int:
     args = parse_args()
-    try:
-        preset_text = args.preset.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"SETUP FAILED: {exc}", file=sys.stderr)
-        return 2
+    profile_path = args.profile.expanduser()
+    existing = _read_existing_profile(profile_path)
+    preset_text = _extract_preset_text(profile_path)
+    if preset_text is None:
+        try:
+            preset_text = args.preset.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"SETUP FAILED: {exc}", file=sys.stderr)
+            return 2
     token = secrets.token_urlsafe(32)
     server = create_setup_server(
-        profile_path=args.profile.expanduser(),
+        profile_path=profile_path,
         preset_text=preset_text,
+        existing=existing,
         token=token,
     )
     url = f"http://127.0.0.1:{server.server_port}/?token={token}"
-    print(f"arXiv Hub setup: {url}")
+    print(f"arXiv Hub setup: {url}", flush=True)
     if not args.no_open and not webbrowser.open(url):
         print(f"Open this URL in a browser: {url}", file=sys.stderr)
     try:
